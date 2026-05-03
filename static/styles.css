@@ -589,9 +589,6 @@ body::after {
     font-size: 1.2rem;
 }
 
-/* ============================================
-   ===== RESPONSIVE: ADAPTACIÓN A MÓVILES =====
-   ============================================ */
 @media (max-width: 600px) {
     body {
         padding: 1rem 0.5rem;
@@ -600,7 +597,7 @@ body::after {
     /* -- FONDO DE VENADOS MÁS VISIBLE EN MÓVIL -- */
     body::before {
         content: "🦌   🦌   🦌   🦌";
-        font-size: 2.6rem;          /* un poco más grandes */
+        font-size: 12rem;          /* un poco más grandes */
         bottom: 15px;
         right: 8px;
         opacity: 0.22;              /* más presencia */
@@ -609,7 +606,7 @@ body::after {
 
     body::after {
         content: "🦌   🦌   🦌   🦌";
-        font-size: 2.6rem;
+        font-size: 12rem;
         top: 70px;                  /* bajado para que entre en la pantalla */
         right: 8px;
         opacity: 0.22;
@@ -621,7 +618,6 @@ body::after {
         z-index: 2;
     }
 
-    /* ------------------------------------------- */
     .header h1 {
         font-size: 1.8rem;
     }
@@ -637,7 +633,7 @@ body::after {
     /* Slider de venados del header más visible */
     .header::after {
         font-size: 2.2rem;          /* un poquito más grande */
-        opacity: 0.4;               /* mucho más nítido */
+        opacity: 0.6;               /* mucho más nítido */
         letter-spacing: 20px;
         left: -20px;
         bottom: -3px;
