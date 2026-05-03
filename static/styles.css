@@ -18,8 +18,8 @@ body {
 body::before {
     content: "🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌";
     position: fixed;
-    top: 230px;
-    right: 20px;
+    top: 480px;
+    left: 20px;
     font-size: 4rem;
     opacity: 0.15;
     white-space: pre;
@@ -33,7 +33,7 @@ body::before {
 body::after {
     content: "🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌";
     position: fixed;
-    top: 180px;
+    top: 185px;
     right: 20px;
     font-size: 4rem;
     opacity: 0.15;
