@@ -672,7 +672,7 @@ body::after {
 
     /* Slider de venados del header más visible */
     .header::after {
-        font-size: 3rem;
+        font-size: 2rem;
         /* un poquito más grande */
         opacity: 0.6;
         /* mucho más nítido */
