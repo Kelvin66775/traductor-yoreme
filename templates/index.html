@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='icon.png') }}">
+    <title>Traductor Yoreme-Mayo</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <img src="{{ url_for('static', filename='icon.png') }}" alt="Venado Yoreme" class="header-icon-img" />
+            <h1>Traductor Yoreme-Mayo</h1>
+            <p>Sistema avanzado de traducción con embeddings semánticos</p>
+        </div>
+
+        <div class="main-card">
+            <div class="direction-selector">
+                <button class="direction-btn active" data-direction="es2yor">
+                    🇲🇽 Español → Yoremnokki
+                </button>
+                <button class="direction-btn" data-direction="yor2es">
+                    🦌 Yoremnokki → Español
+                </button>
+            </div>
+
+            <div class="search-container">
+                <input type="text" class="search-input" id="searchInput" placeholder="Escribe una palabra o frase..."
+                    autocomplete="off">
+                <button class="search-btn" id="searchBtn">
+                    <span>🔍</span> Traducir
+                </button>
+            </div>
+
+            <div id="loadingContainer" class="loading" style="display: none;">
+                <img src="{{ url_for('static', filename='main.png') }}" alt="Cargando..." class="spinner-img" />
+                <p>Procesando traducción...</p>
+            </div>
+
+            <div id="resultsContainer" class="results-container">
+                <!-- Los resultados se insertan aquí dinámicamente -->
+            </div>
+        </div>
+
+        <div class="stats-card">
+            <h2>Estadísticas del Sistema</h2>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-number" id="totalPairs">{{ total_pairs }}</div>
+                    <div class="stat-label">Pares de traducción</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{{ embedding_dim }}</div>
+                    <div class="stat-label">Dimensión de embeddings</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">5</div>
+                    <div class="stat-label">Algoritmos de búsqueda</div>
+                </div>
+            </div>
+            <div class="deer-footer">
+                <span>🦌</span> Traductor yoreme · Nativa Solutions <span>🦌</span>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
