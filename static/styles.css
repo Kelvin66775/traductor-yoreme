@@ -597,8 +597,8 @@ body::after {
     /* -- FONDO DE VENADOS MÁS VISIBLE EN MÓVIL -- */
     body::before {
         content: "🦌   🦌   🦌   🦌";
-        font-size: 12rem;          /* un poco más grandes */
-        bottom: 15px;
+        font-size: 6rem;          /* un poco más grandes */
+        bottom: 30px;
         right: 8px;
         opacity: 0.22;              /* más presencia */
         z-index: 1;                 /* aseguramos que esté sobre el gradiente */
@@ -606,8 +606,8 @@ body::after {
 
     body::after {
         content: "🦌   🦌   🦌   🦌";
-        font-size: 12rem;
-        top: 70px;                  /* bajado para que entre en la pantalla */
+        font-size: 6rem;
+        top: 100px;                  /* bajado para que entre en la pantalla */
         right: 8px;
         opacity: 0.22;
         z-index: 1;
