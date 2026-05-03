@@ -25,7 +25,8 @@ body::before {
     white-space: pre;
     pointer-events: none;
     transform: rotate(-3deg);
-    z-index: 0;                 /* visible sobre el fondo, pero detrás del contenido */
+    z-index: 0;
+    /* visible sobre el fondo, pero detrás del contenido */
 }
 
 /* Segunda manada de venados decorativos (ESQUINA SUPERIOR DERECHA) */
@@ -39,7 +40,8 @@ body::after {
     white-space: pre;
     pointer-events: none;
     transform: rotate(-2deg);
-    z-index: 0;                 /* mismo nivel que ::before */
+    z-index: 0;
+    /* mismo nivel que ::before */
 }
 
 /* ===== CONTAINER ===== */
@@ -49,8 +51,10 @@ body::after {
     display: flex;
     flex-direction: column;
     gap: 2rem;
-    position: relative;        /* nuevo: establece contexto de apilamiento */
-    z-index: 1;                /* nuevo: todo el contenido por encima de los venados */
+    position: relative;
+    /* nuevo: establece contexto de apilamiento */
+    z-index: 1;
+    /* nuevo: todo el contenido por encima de los venados */
 }
 
 /* ===== HEADER ===== */
@@ -77,8 +81,13 @@ body::after {
 }
 
 @keyframes slideDeer {
-    0% { transform: translateX(-220px); }
-    100% { transform: translateX(calc(100% + 700px)); }
+    100% {
+        transform: translateX(-220px);
+    }
+
+    0% {
+        transform: translateX(calc(100% + 700px));
+    }
 }
 
 .header-icon-img {
@@ -86,7 +95,7 @@ body::after {
     height: auto;
     display: block;
     margin: 0 auto 0.5rem;
-    filter: drop-shadow(0 4px 6px rgba(0,0,0,0.2));
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.2));
 }
 
 .header h1 {
@@ -108,7 +117,7 @@ body::after {
     backdrop-filter: blur(12px);
     border-radius: 24px;
     padding: 2rem;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
     border: 1px solid rgba(251, 140, 0, 0.15);
 }
 
@@ -211,9 +220,17 @@ body::after {
 }
 
 @keyframes spin {
-    0% { transform: rotate(0deg) scale(1); }
-    50% { transform: rotate(180deg) scale(1.2); }
-    100% { transform: rotate(360deg) scale(1); }
+    0% {
+        transform: rotate(0deg) scale(1);
+    }
+
+    50% {
+        transform: rotate(180deg) scale(1.2);
+    }
+
+    100% {
+        transform: rotate(360deg) scale(1);
+    }
 }
 
 .loading p {
@@ -283,7 +300,7 @@ body::after {
     border-radius: 16px;
     padding: 1.5rem;
     margin-bottom: 1rem;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
     border-left: 4px solid #fb8c00;
     transition: transform 0.2s;
 }
@@ -312,9 +329,17 @@ body::after {
     margin: 0.3rem 0;
 }
 
-.match-type.green { color: #10b981; }
-.match-type.amber { color: #f59e0b; }
-.match-type.indigo { color: #6366f1; }
+.match-type.green {
+    color: #10b981;
+}
+
+.match-type.amber {
+    color: #f59e0b;
+}
+
+.match-type.indigo {
+    color: #6366f1;
+}
 
 .confidence-bar {
     height: 6px;
@@ -355,7 +380,8 @@ body::after {
     margin-bottom: 0.6rem;
 }
 
-.plus-sign, .arrow {
+.plus-sign,
+.arrow {
     color: #b38b5b;
     font-weight: bold;
 }
@@ -530,7 +556,7 @@ body::after {
     padding: 1.8rem;
     text-align: center;
     border: 1px solid rgba(251, 140, 0, 0.2);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.05);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05);
 }
 
 .stats-card h2 {
@@ -597,20 +623,34 @@ body::after {
     /* -- FONDO DE VENADOS MÁS VISIBLE EN MÓVIL -- */
     body::before {
         content: "🦌   🦌   🦌   🦌";
-        font-size: 8rem;          /* un poco más grandes */
+        font-size: 8rem;
+        /* un poco más grandes */
         bottom: 40px;
         right: 8px;
-        opacity: 0.22;              /* más presencia */
-        z-index: 1;                 /* aseguramos que esté sobre el gradiente */
+        opacity: 0.22;
+        /* más presencia */
+        z-index: 1;
+        /* aseguramos que esté sobre el gradiente */
     }
 
     body::after {
         content: "🦌   🦌   🦌   🦌";
         font-size: 8rem;
-        top: 160px;                  /* bajado para que entre en la pantalla */
+        top: 160px;
+        /* bajado para que entre en la pantalla */
         right: 8px;
         opacity: 0.22;
         z-index: 1;
+    }
+
+    @keyframes slideDeer {
+        100% {
+            transform: translateX(-220px);
+        }
+
+        0% {
+            transform: translateX(calc(100% + 300px));
+        }
     }
 
     /* Contenedor principal por encima de los venados */
@@ -632,8 +672,10 @@ body::after {
 
     /* Slider de venados del header más visible */
     .header::after {
-        font-size: 2.2rem;          /* un poquito más grande */
-        opacity: 0.6;               /* mucho más nítido */
+        font-size: 2.2rem;
+        /* un poquito más grande */
+        opacity: 0.6;
+        /* mucho más nítido */
         letter-spacing: 20px;
         left: -20px;
         bottom: -3px;
@@ -683,7 +725,8 @@ body::after {
         gap: 1.2rem;
     }
 
-    .main-card, .stats-card {
+    .main-card,
+    .stats-card {
         padding: 1.2rem;
     }
 
