@@ -10,6 +10,8 @@ from openai import AzureOpenAI
 from functools import lru_cache
 import time
 from threading import Lock
+import sys
+from pathlib import Path
 
 class RateLimiter:
     """Rate limiter para prevenir abuso de la API"""
@@ -607,36 +609,35 @@ def health():
     """Health check endpoint para Railway"""
     return jsonify({'status': 'ok', 'service': 'yoremnokki-translator'}), 200
 
+possible_paths = [
+    'traductor_assets/traductor_yoremnokki.db',
+    'traductor_yoremnokki.db',
+    './traductor_yoremnokki.db',
+    os.getenv("DATABASE_PATH", ""),   # opcional: permitir ruta por variable de entorno
+]
+
+db_path = None
+for path in possible_paths:
+    if path and Path(path).exists():
+        db_path = path
+        break
+
+if not db_path:
+    print("❌ Error: No se encuentra la base de datos")
+    print(f"   Buscado en: {possible_paths}")
+    sys.exit(1)
+
+print("Inicializando traductor Yoremnokki...")
+translator = YoremnokkilTranslator(db_path)
+
+print("\n" + "="*60)
+print("✓ Servidor listo (translator cargado)")
+print("="*60)
+print(f"\n📊 Total de pares: {translator.total_pairs}")
+print(f"🧠 Modelo: all-MiniLM-L6-v2 ({translator.embedding_dim}D)")
+# ============================================================
+
+# Mantén el bloque if __name__ solo para desarrollo local
 if __name__ == '__main__':
-    import sys
-    
-    # Buscar base de datos en diferentes rutas posibles
-    possible_paths = [
-        'traductor_assets/traductor_yoremnokki.db',
-        'traductor_yoremnokki.db',
-        './traductor_yoremnokki.db'
-    ]
-    
-    db_path = None
-    for path in possible_paths:
-        if Path(path).exists():
-            db_path = path
-            break
-    
-    if not db_path:
-        print(f"❌ Error: No se encuentra la base de datos")
-        print(f"   Buscado en: {possible_paths}")
-        sys.exit(1)
-    
-    print("Inicializando traductor Yoremnokki...")
-    translator = YoremnokkilTranslator(db_path)
-    
-    print("\n" + "="*60)
-    print("✓ Servidor Flask iniciado correctamente")
-    print("="*60)
-    print(f"\n📊 Total de pares: {translator.total_pairs}")
-    print(f"🧠 Modelo: all-MiniLM-L6-v2 ({translator.embedding_dim}D)")
-    
-    # Railway asigna el puerto dinámicamente
     port = int(os.getenv("PORT", 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
