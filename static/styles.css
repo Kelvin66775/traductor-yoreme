@@ -14,7 +14,7 @@ body {
     position: relative;
 }
 
-/* Huellas de venado decorativas en el fondo */
+/* Huellas de venado decorativas en el fondo (ESQUINA INFERIOR DERECHA) */
 body::before {
     content: "🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌";
     position: fixed;
@@ -25,9 +25,10 @@ body::before {
     white-space: pre;
     pointer-events: none;
     transform: rotate(-3deg);
+    z-index: 0;                 /* visible sobre el fondo, pero detrás del contenido */
 }
 
-/* Segunda manada de venados decorativos, arriba a la izquierda */
+/* Segunda manada de venados decorativos (ESQUINA SUPERIOR DERECHA) */
 body::after {
     content: "🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌";
     position: fixed;
@@ -38,7 +39,7 @@ body::after {
     white-space: pre;
     pointer-events: none;
     transform: rotate(-2deg);
-	z-index: -1;
+    z-index: 0;                 /* mismo nivel que ::before */
 }
 
 /* ===== CONTAINER ===== */
@@ -48,6 +49,8 @@ body::after {
     display: flex;
     flex-direction: column;
     gap: 2rem;
+    position: relative;        /* nuevo: establece contexto de apilamiento */
+    z-index: 1;                /* nuevo: todo el contenido por encima de los venados */
 }
 
 /* ===== HEADER ===== */
@@ -79,7 +82,7 @@ body::after {
 }
 
 .header-icon-img {
-    width: 65px;              /* Ajusta el tamaño */
+    width: 65px;
     height: auto;
     display: block;
     margin: 0 auto 0.5rem;
@@ -201,7 +204,7 @@ body::after {
 }
 
 .spinner-img {
-    width: 60px;              /* Tamaño ajustable */
+    width: 60px;
     height: 60px;
     animation: spin 1.2s cubic-bezier(0.68, -0.55, 0.27, 1.55) infinite;
     display: inline-block;
@@ -437,7 +440,7 @@ body::after {
 }
 
 .ai-icon-img {
-    width: 20px;        /* Ajusta el tamaño que quieras */
+    width: 20px;
     height: 20px;
     vertical-align: middle;
     margin-right: 6px;
@@ -586,27 +589,98 @@ body::after {
     font-size: 1.2rem;
 }
 
-/* ===== RESPONSIVE ===== */
+/* ============================================
+   ===== RESPONSIVE: ADAPTACIÓN A MÓVILES =====
+   ============================================ */
 @media (max-width: 600px) {
+    body {
+        padding: 1rem 0.5rem;
+    }
+
+    /* -- Reducimos venados en móvil para que no abrumen -- */
+    body::before {
+        content: "🦌   🦌   🦌   🦌";   /* menos emojis */
+        font-size: 2.2rem;
+        bottom: 10px;
+        right: 5px;
+        opacity: 0.12;
+    }
+
+    body::after {
+        content: "🦌   🦌   🦌   🦌";
+        font-size: 2.2rem;
+        top: 100px;               /* bajamos un poco para que no tape el header */
+        right: 5px;
+        opacity: 0.12;
+    }
+
     .header h1 {
         font-size: 1.8rem;
     }
-    
-    .search-container {
-        flex-direction: column;
+
+    .header p {
+        font-size: 0.9rem;
     }
-    
+
+    .header-icon-img {
+        width: 50px;
+    }
+
+    .header::after {
+        font-size: 2rem;
+        letter-spacing: 20px;
+        left: -20px;
+    }
+
     .direction-selector {
         flex-direction: column;
     }
-    
-    .stat-number {
-        width: 80px;
-        height: 80px;
-        font-size: 2.2rem;
+
+    .search-container {
+        flex-direction: column;
     }
-    
+
+    .search-input {
+        font-size: 1rem;
+        padding: 0.9rem 1rem;
+    }
+
+    .search-btn {
+        justify-content: center;
+        padding: 0.9rem;
+    }
+
     .translation-main {
         font-size: 1.5rem;
+    }
+
+    .translation-card {
+        padding: 1rem;
+    }
+
+    .alternatives-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .stats-grid {
+        gap: 1rem;
+    }
+
+    .stat-number {
+        width: 70px;
+        height: 70px;
+        font-size: 1.5rem;
+    }
+
+    .container {
+        gap: 1.2rem;
+    }
+
+    .main-card, .stats-card {
+        padding: 1.2rem;
+    }
+
+    .deer-footer {
+        font-size: 0.8rem;
     }
 }
