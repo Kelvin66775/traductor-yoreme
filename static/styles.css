@@ -18,7 +18,7 @@ body {
 body::before {
     content: "🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌   🦌";
     position: fixed;
-    bottom: 15px;
+    top: 230px;
     right: 20px;
     font-size: 4rem;
     opacity: 0.15;
@@ -718,7 +718,7 @@ body::after {
     .stat-number {
         width: 70px;
         height: 70px;
-        font-size: 1.5rem;
+        font-size: 1rem;
     }
 
     .container {
