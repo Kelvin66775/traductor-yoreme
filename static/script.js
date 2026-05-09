@@ -1,6 +1,7 @@
-// (El script es exactamente el mismo que tenías, sin cambios)
 let currentDirection = 'es2yor';
+let searchHistory = [];   // Almacenará { query, direction, resultData }
 
+// --- Configuración de botones de dirección ---
 document.querySelectorAll('.direction-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         document.querySelectorAll('.direction-btn').forEach(b => b.classList.remove('active'));
@@ -11,9 +12,16 @@ document.querySelectorAll('.direction-btn').forEach(btn => {
             ? 'Ej: buenos días, casa, agua...'
             : 'Ej: Kittianake, bwapo, bakte...';
         document.getElementById('searchInput').placeholder = placeholder;
+
+        // Limpiar búsqueda y resultados al cambiar de dirección
+        document.getElementById('searchInput').value = '';
+        const resultsContainer = document.getElementById('resultsContainer');
+        resultsContainer.innerHTML = '';
+        resultsContainer.classList.remove('show');
     });
 });
 
+// --- Función principal de búsqueda ---
 async function performSearch() {
     const query = document.getElementById('searchInput').value.trim();
     if (!query) {
@@ -32,6 +40,15 @@ async function performSearch() {
         });
         const data = await response.json();
         displayResults(data);
+
+        // Solo agregar al historial si hay algún resultado
+        const hasResults = data.exact_matches.length > 0 ||
+            data.compositional ||
+            data.morphological ||
+            data.alternatives.length > 0;
+        if (hasResults) {
+            addToHistory(query, currentDirection, data);
+        }
     } catch (error) {
         console.error('Error:', error);
         alert('Error al procesar la traducción');
@@ -40,11 +57,13 @@ async function performSearch() {
     }
 }
 
+// Eventos del input y botón
 document.getElementById('searchBtn').addEventListener('click', performSearch);
 document.getElementById('searchInput').addEventListener('keypress', (e) => {
     if (e.key === 'Enter') performSearch();
 });
 
+// --- Mostrar resultados ---
 function displayResults(data) {
     const container = document.getElementById('resultsContainer');
     container.innerHTML = '';
@@ -56,17 +75,17 @@ function displayResults(data) {
 
     if (!hasResults) {
         container.innerHTML = `
-                    <div class="no-results">
-                        <div class="no-results-icon">🦌🔍</div>
-                        <h3>No se encontraron resultados</h3>
-                        <p>Intenta con:</p>
-                        <ul style="list-style: none; margin-top: 15px;">
-                            <li>✓ Verificar ortografía</li>
-                            <li>✓ Buscar palabras individuales</li>
-                            <li>✓ Usar sinónimos</li>
-                        </ul>
-                    </div>
-                `;
+            <div class="no-results">
+                <div class="no-results-icon">🦌🔍</div>
+                <h3>No se encontraron resultados</h3>
+                <p>Intenta con:</p>
+                <ul style="list-style: none; margin-top: 15px;">
+                    <li>✓ Verificar ortografía</li>
+                    <li>✓ Buscar palabras individuales</li>
+                    <li>✓ Usar sinónimos</li>
+                </ul>
+            </div>
+        `;
         container.classList.add('show');
         return;
     }
@@ -76,11 +95,11 @@ function displayResults(data) {
         const exactSection = document.createElement('div');
         exactSection.className = 'result-section';
         exactSection.innerHTML = `
-                    <div class="section-title">
-                        ✔ Coincidencia Exacta
-                        <span class="badge badge-exact">Precisión 100%</span>
-                    </div>
-                `;
+            <div class="section-title">
+                ✔ Coincidencia Exacta
+                <span class="badge badge-exact">Precisión 100%</span>
+            </div>
+        `;
 
         data.exact_matches.forEach(match => {
             const card = document.createElement('div');
@@ -96,63 +115,52 @@ function displayResults(data) {
             }
 
             card.innerHTML = `
-                        <div class="translation-main">${match.target}</div>
-                        <div class="translation-source">Fuente: ${match.source}</div>
-                        ${matchTypeLabel}
-                        <div class="confidence-bar">
-                            <div class="confidence-fill" style="width: 100%"></div>
-                        </div>
-                    `;
+                <div class="translation-main">${match.target}</div>
+                <div class="translation-source">Fuente: ${match.source}</div>
+                ${matchTypeLabel}
+                <div class="confidence-bar">
+                    <div class="confidence-fill" style="width: 100%"></div>
+                </div>
+            `;
             exactSection.appendChild(card);
         });
         container.appendChild(exactSection);
     }
 
-    // Segmentación morfológica
+    // Segmentación morfológica (simplificada, sin caja de análisis)
     if (data.morphological) {
         const morphSection = document.createElement('div');
         morphSection.className = 'result-section';
         morphSection.innerHTML = `
-                    <div class="section-title">
-                        ✔ Segmentación Morfológica
-                        <span class="badge badge-compositional">Análisis de raíz + sufijo</span>
-                    </div>
-                `;
+            <div class="section-title">
+                🔬 Traducción Morfológica
+                <span class="badge badge-compositional">Raíz + sufijo</span>
+            </div>
+        `;
 
         const card = document.createElement('div');
         card.className = 'translation-card';
-        const part1Type = data.morphological.part1_exact ? 'exacta' : `fuzzy (${(data.morphological.part1_similarity * 100).toFixed(1)}%)`;
-
         card.innerHTML = `
-                    <div class="translation-main">${data.morphological.translation}</div>
-                    <div class="morph-detail-box">
-                        <div class="morph-label">Análisis de segmentación:</div>
-                        <div class="morph-segments">
-                            <span class="chunk chunk-known">${data.morphological.part1}</span>
-                            <span class="plus-sign">+</span>
-                            <span class="chunk chunk-known">${data.morphological.part2}</span>
-                            <span class="arrow">→</span>
-                            <span class="chunk chunk-translation">${data.morphological.part1_translation}</span>
-                            <span class="plus-sign">+</span>
-                            <span class="chunk chunk-translation">${data.morphological.part2_translation}</span>
-                        </div>
-                        <div class="morph-meta">Raíz: ${part1Type} | Sufijo: exacta | Score: ${(data.morphological.score * 100).toFixed(0)}%</div>
-                    </div>
-                `;
+            <div class="translation-main">${data.morphological.translation}</div>
+            <div class="translation-source">Análisis: ${data.morphological.part1} + ${data.morphological.part2}</div>
+            <div class="confidence-bar">
+                <div class="confidence-fill" style="width: ${(data.morphological.score * 100).toFixed(0)}%"></div>
+            </div>
+        `;
         morphSection.appendChild(card);
         container.appendChild(morphSection);
     }
 
-    // Traducción composicional
+    // Traducción composicional (sin cambios)
     if (data.compositional) {
         const compSection = document.createElement('div');
         compSection.className = 'result-section';
         compSection.innerHTML = `
-                    <div class="section-title">
-                        🔗 Traducción Composicional
-                        <span class="badge badge-compositional">Ensamblada</span>
-                    </div>
-                `;
+            <div class="section-title">
+                🔗 Traducción Composicional
+                <span class="badge badge-compositional">Ensamblada</span>
+            </div>
+        `;
 
         const card = document.createElement('div');
         card.className = 'translation-card';
@@ -179,64 +187,45 @@ function displayResults(data) {
             return `<span class="chunk ${className}" title="${tooltip}">${chunk.translation}</span>`;
         }).join('');
 
-        const hasMorph = data.compositional.chunks.some(c => c.match_type === 'morphological');
-        let morphDetails = '';
-        if (hasMorph) {
-            const morphChunks = data.compositional.chunks.filter(c => c.match_type === 'morphological');
-            morphDetails = '<div class="morph-detail-box"><strong>Análisis morfológico:</strong>';
-            morphChunks.forEach(chunk => {
-                const d = chunk.morphological_detail;
-                morphDetails += `
-                            <div class="morph-sub">
-                                "<span>${chunk.source}</span>" → 
-                                <span class="chunk chunk-known">${d.part1}</span> + <span class="chunk chunk-known">${d.part2}</span> → 
-                                <span class="chunk-translation">${d.part1_translation} ${d.part2_translation}</span>
-                            </div>
-                        `;
-            });
-            morphDetails += '</div>';
-        }
-
         card.innerHTML = `
-                    <div class="translation-main">${data.compositional.translation}</div>
-                    ${data.compositional.translation_corrected ? `
-                        <div class="ai-correction">
-                            <div class="ai-header"><img src="/static/gpt.png" alt="IA" class="ai-icon-img"> Corrección con IA (Azure gpt-4.1-mini):</div>
-                            <div class="ai-text">${data.compositional.translation_corrected}</div>
-                        </div>
-                    ` : ''}
-                    ${data.compositional.azure_error ? `
-                        <div class="ai-error">⚠ Error de IA: ${data.compositional.azure_error}</div>
-                    ` : ''}
-                    <div class="chunks-container">${chunksHtml}</div>
-                    ${morphDetails}
-                    ${data.compositional.has_unknowns ? '<p class="unknown-warning">⚠ Contiene palabras sin traducción conocida</p>' : ''}
-                `;
+            <div class="translation-main">${data.compositional.translation}</div>
+            ${data.compositional.translation_corrected ? `
+                <div class="ai-correction">
+                    <div class="ai-header"><img src="/static/gpt.png" alt="IA" class="ai-icon-img"> Corrección con IA (Azure gpt-4.1-mini):</div>
+                    <div class="ai-text">${data.compositional.translation_corrected}</div>
+                </div>
+            ` : ''}
+            ${data.compositional.azure_error ? `
+                <div class="ai-error">⚠ Error de IA: ${data.compositional.azure_error}</div>
+            ` : ''}
+            <div class="chunks-container">${chunksHtml}</div>
+            ${data.compositional.has_unknowns ? '<p class="unknown-warning">⚠ Contiene palabras sin traducción conocida</p>' : ''}
+        `;
         compSection.appendChild(card);
         container.appendChild(compSection);
     }
 
-    // Alternativas
+    // Alternativas (sin cambios)
     if (data.alternatives.length > 0) {
         const altSection = document.createElement('div');
         altSection.className = 'result-section';
         altSection.innerHTML = `
-                    <div class="section-title">
-                        🔎 Sugerencias Relacionadas
-                        <span class="badge badge-fuzzy">Similitud</span>
-                    </div>
-                    <div class="alternatives-grid" id="alternativesGrid"></div>
-                `;
+            <div class="section-title">
+                🔎 Sugerencias Relacionadas
+                <span class="badge badge-fuzzy">Similitud</span>
+            </div>
+            <div class="alternatives-grid" id="alternativesGrid"></div>
+        `;
         const grid = altSection.querySelector('#alternativesGrid');
         data.alternatives.forEach(alt => {
             const card = document.createElement('div');
             card.className = 'alternative-card';
             const scorePercent = (alt.score * 100).toFixed(0);
             card.innerHTML = `
-                        <div class="alternative-main">${alt.target}</div>
-                        <div class="alternative-source">${alt.source}</div>
-                        <span class="score-badge">${scorePercent}% similar</span>
-                    `;
+                <div class="alternative-main">${alt.target}</div>
+                <div class="alternative-source">${alt.source}</div>
+                <span class="score-badge">${scorePercent}% similar</span>
+            `;
             grid.appendChild(card);
         });
         container.appendChild(altSection);
@@ -245,4 +234,64 @@ function displayResults(data) {
     container.classList.add('show');
 }
 
+// --- Historial de búsqueda (ahora almacena resultados) ---
+function addToHistory(query, direction, resultData) {
+    // Evitar duplicados inmediatos (misma query, dirección y mismo resultado básico)
+    if (searchHistory.length > 0 &&
+        searchHistory[0].query === query &&
+        searchHistory[0].direction === direction) {
+        return;
+    }
+    searchHistory.unshift({ query, direction, resultData });
+    // Mantener solo 3
+    if (searchHistory.length > 3) {
+        searchHistory = searchHistory.slice(0, 3);
+    }
+    renderHistory();
+}
+
+function renderHistory() {
+    const historyList = document.getElementById('historyList');
+    if (searchHistory.length === 0) {
+        historyList.innerHTML = '<p class="history-empty">Aún no has hecho ninguna búsqueda.</p>';
+        return;
+    }
+
+    let html = '';
+    searchHistory.forEach(item => {
+        const dirLabel = item.direction === 'es2yor' ? 'ES→YOR' : 'YOR→ES';
+        html += `
+            <div class="history-item" data-query="${item.query}" data-direction="${item.direction}">
+                <span class="history-query">${item.query}</span>
+                <span class="history-direction">${dirLabel}</span>
+            </div>
+        `;
+    });
+    historyList.innerHTML = html;
+
+    // Asignar eventos de clic: mostrar resultado almacenado sin buscar de nuevo
+    document.querySelectorAll('.history-item').forEach((itemElement, index) => {
+        itemElement.addEventListener('click', () => {
+            const historyEntry = searchHistory[index];
+            if (!historyEntry || !historyEntry.resultData) return;
+
+            // Actualizar la interfaz de dirección
+            document.querySelectorAll('.direction-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.dataset.direction === historyEntry.direction) {
+                    btn.classList.add('active');
+                }
+            });
+            currentDirection = historyEntry.direction;
+
+            // Poner el texto en el input (opcional, pero no ejecutará búsqueda)
+            document.getElementById('searchInput').value = historyEntry.query;
+
+            // Mostrar los resultados almacenados directamente
+            displayResults(historyEntry.resultData);
+        });
+    });
+}
+
+// Enfoque inicial
 document.getElementById('searchInput').focus();
