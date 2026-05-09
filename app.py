@@ -12,41 +12,48 @@ import time
 from threading import Lock
 import sys
 from pathlib import Path
+import faiss  # <-- Añadido para búsqueda eficiente
+
 
 class RateLimiter:
     """Rate limiter para prevenir abuso de la API"""
+
     def __init__(self, max_calls=30, period=60):
         self.max_calls = max_calls
         self.period = period
         self.calls = {}
         self.lock = Lock()
-    
+
     def is_allowed(self, client_id):
         with self.lock:
             now = time.time()
             if client_id not in self.calls:
                 self.calls[client_id] = []
-            
+
             # Limpiar llamadas antiguas
-            self.calls[client_id] = [t for t in self.calls[client_id] if now - t < self.period]
-            
+            self.calls[client_id] = [
+                t for t in self.calls[client_id] if now - t < self.period]
+
             if len(self.calls[client_id]) >= self.max_calls:
                 return False
-            
+
             self.calls[client_id].append(now)
             return True
+
 
 class YoremnokkilTranslator:
     def __init__(self, db_path):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        
+
         # Configurar caché para el modelo
-        model_cache_dir = os.getenv("SENTENCE_TRANSFORMERS_HOME", "./model_cache")
+        model_cache_dir = os.getenv(
+            "SENTENCE_TRANSFORMERS_HOME", "./model_cache")
         os.makedirs(model_cache_dir, exist_ok=True)
-        
+
         print(f"📦 Cargando modelo Sentence Transformers...")
-        self.model = SentenceTransformer('all-MiniLM-L6-v2', cache_folder=model_cache_dir)
+        self.model = SentenceTransformer(
+            'all-MiniLM-L6-v2', cache_folder=model_cache_dir)
         print(f"✓ Modelo cargado correctamente")
 
         # Leer credenciales de Azure desde variables de entorno
@@ -54,27 +61,27 @@ class YoremnokkilTranslator:
         azure_key = os.getenv("AZURE_OPENAI_KEY", "")
         azure_deployment = os.getenv("AZURE_DEPLOYMENT", "gpt-4.1-mini")
         azure_model = os.getenv("AZURE_MODEL", "gpt-4.1-mini")
-        
+
         # Rate limiter para Azure API
         self.azure_rate_limiter = RateLimiter(max_calls=30, period=60)
 
         self.azure_client = None
         self.azure_deployment = str(azure_deployment)
         self.azure_model = str(azure_model)
-        
+
         if azure_endpoint and azure_key:
             try:
                 endpoint_clean = str(azure_endpoint).strip().rstrip('/')
                 key_clean = str(azure_key).strip()
-                
+
                 # Limpiar endpoint si tiene /openai al final
                 if '/openai' in endpoint_clean:
                     parts = endpoint_clean.split('/openai')
                     endpoint_clean = parts[0]
-                
+
                 if not endpoint_clean.endswith('/'):
                     endpoint_clean += '/'
-                
+
                 if not endpoint_clean or not key_clean:
                     print("⚠ Azure OpenAI: credenciales vacías")
                 else:
@@ -90,24 +97,50 @@ class YoremnokkilTranslator:
                 print(f"⚠ Error configurando Azure OpenAI: {e}")
         else:
             print("⚠ Azure OpenAI no configurado (sin corrección gramatical)")
-        
+
+        # 1. Cargar datos en caché
         self.cache_data()
-        
+
+        # 2. Obtener metadatos (dimensiones y total de pares)
         cursor = self.conn.cursor()
         cursor.execute("SELECT value FROM metadata WHERE key='embedding_dim'")
         self.embedding_dim = int(cursor.fetchone()[0])
-        
         cursor.execute("SELECT value FROM metadata WHERE key='total_pairs'")
         self.total_pairs = int(cursor.fetchone()[0])
-        
+
+        # 3. Construir índices FAISS (ahora ya tenemos self.embedding_dim)
+        self._build_faiss_indexes()
+
         print(f"✓ Base de datos cargada: {self.total_pairs} pares")
-    
+
+    def _build_faiss_indexes(self):
+        """Construye índices FAISS para búsqueda eficiente por similitud coseno."""
+        print("🔧 Construyendo índices FAISS...")
+        # Extraer embeddings y normalizarlos
+        esp_embs = np.array([item['esp_embedding']
+                            for item in self.data_cache])
+        yor_embs = np.array([item['yor_embedding']
+                            for item in self.data_cache])
+
+        # Normalizar (norma L2) para que el producto interno sea coseno
+        faiss.normalize_L2(esp_embs)
+        faiss.normalize_L2(yor_embs)
+
+        dim = self.embedding_dim
+        self.esp_index = faiss.IndexIDMap(faiss.IndexFlatIP(dim))
+        self.yor_index = faiss.IndexIDMap(faiss.IndexFlatIP(dim))
+
+        ids = np.arange(len(self.data_cache))
+        self.esp_index.add_with_ids(esp_embs, ids)
+        self.yor_index.add_with_ids(yor_embs, ids)
+        print("✓ Índices FAISS creados")
+
     def levenshtein_distance(self, s1, s2):
         if len(s1) < len(s2):
             return self.levenshtein_distance(s2, s1)
         if len(s2) == 0:
             return len(s1)
-        
+
         previous_row = range(len(s2) + 1)
         for i, c1 in enumerate(s1):
             current_row = [i + 1]
@@ -117,21 +150,23 @@ class YoremnokkilTranslator:
                 substitutions = previous_row[j] + (c1 != c2)
                 current_row.append(min(insertions, deletions, substitutions))
             previous_row = current_row
-        
+
         return previous_row[-1]
-    
+
     def normalize_text(self, text):
         text = text.lower()
         text = unicodedata.normalize('NFD', text)
-        text = ''.join(char for char in text if unicodedata.category(char) != 'Mn')
+        text = ''.join(
+            char for char in text if unicodedata.category(char) != 'Mn')
         text = text.strip()
         text = re.sub(r'\s+', ' ', text)
         return text
-    
+
     def cache_data(self):
         cursor = self.conn.cursor()
-        cursor.execute("SELECT id, espanol, yoremnokki, esp_embedding, yor_embedding FROM traducciones")
-        
+        cursor.execute(
+            "SELECT id, espanol, yoremnokki, esp_embedding, yor_embedding FROM traducciones")
+
         self.data_cache = []
         for row in cursor.fetchall():
             db_id, espanol, yoremnokki, esp_blob, yor_blob = row
@@ -144,68 +179,72 @@ class YoremnokkilTranslator:
                 'esp_embedding': np.frombuffer(esp_blob, dtype=np.float32),
                 'yor_embedding': np.frombuffer(yor_blob, dtype=np.float32)
             })
-    
+
     def exact_match(self, query, direction='es2yor', allow_typos=False, max_edits=1):
         query_lower = query.lower()
         query_norm = self.normalize_text(query)
         source_key = 'espanol' if direction == 'es2yor' else 'yoremnokki'
         source_norm_key = 'espanol_norm' if direction == 'es2yor' else 'yoremnokki_norm'
-        
+
         matches = []
-        
+
         for item in self.data_cache:
             if item[source_key].lower() == query_lower:
-                matches.append({**item, 'edit_distance': 0, 'match_type_original': 'original_acento'})
-        
+                matches.append({**item, 'edit_distance': 0,
+                               'match_type_original': 'original_acento'})
+
         if matches:
             return matches
-        
+
         for item in self.data_cache:
             if item[source_norm_key] == query_norm:
-                matches.append({**item, 'edit_distance': 0, 'match_type_original': 'normalized'})
+                matches.append({**item, 'edit_distance': 0,
+                               'match_type_original': 'normalized'})
             elif allow_typos:
                 len_diff = abs(len(item[source_norm_key]) - len(query_norm))
                 if len_diff <= max_edits:
-                    dist = self.levenshtein_distance(item[source_norm_key], query_norm)
+                    dist = self.levenshtein_distance(
+                        item[source_norm_key], query_norm)
                     if dist <= max_edits:
-                        matches.append({**item, 'edit_distance': dist, 'match_type_original': 'typo'})
-        
+                        matches.append(
+                            {**item, 'edit_distance': dist, 'match_type_original': 'typo'})
+
         matches.sort(key=lambda x: x.get('edit_distance', 0))
         return matches
-    
+
     def morphological_split_search(self, word, direction='es2yor', min_ratio=0.45, fuzzy_threshold=0.90):
         if direction != 'yor2es':
             return {'found': False, 'splits': []}
-        
+
         word_norm = self.normalize_text(word)
         word_len = len(word_norm)
-        
+
         if word_len < 4:
             return {'found': False, 'splits': []}
-        
+
         valid_splits = []
         source_norm_key = 'yoremnokki_norm'
         target_key = 'espanol'
-        
+
         for split_pos in range(int(word_len * min_ratio), int(word_len * 0.95) + 1):
             part1_norm = word_norm[:split_pos]
             part2_norm = word_norm[split_pos:]
-            
+
             if len(part1_norm) < 1 or len(part2_norm) < 1:
                 continue
-            
+
             part2_matches = []
             for item in self.data_cache:
                 if item[source_norm_key] == part2_norm:
                     part2_matches.append(item)
-            
+
             if not part2_matches:
                 continue
-            
+
             part1_candidates = []
             for item in self.data_cache:
                 item_norm = item[source_norm_key]
-                
+
                 if item_norm == part1_norm:
                     part1_candidates.append({
                         'item': item,
@@ -216,23 +255,23 @@ class YoremnokkilTranslator:
                     max_len = max(len(item_norm), len(part1_norm))
                     if max_len == 0:
                         continue
-                    
+
                     lev_dist = self.levenshtein_distance(item_norm, part1_norm)
                     similarity = 1.0 - (lev_dist / max_len)
-                    
+
                     if similarity >= fuzzy_threshold:
                         part1_candidates.append({
                             'item': item,
                             'similarity': similarity,
                             'is_exact': False
                         })
-            
+
             for p1_cand in part1_candidates:
                 for p2_match in part2_matches:
                     combined_translation = f"{p1_cand['item'][target_key]} {p2_match[target_key]}"
-                
+
                     score = p1_cand['similarity'] * 0.7 + 0.3
-                    
+
                     valid_splits.append({
                         'part1': p1_cand['item'][source_norm_key],
                         'part2': p2_match[source_norm_key],
@@ -245,90 +284,104 @@ class YoremnokkilTranslator:
                         'score': score,
                         'split_position': split_pos
                     })
-        
+
         valid_splits.sort(key=lambda x: x['score'], reverse=True)
-        
+
         return {
             'found': len(valid_splits) > 0,
             'splits': valid_splits[:3]
         }
-    
+
     def fuzzy_token_match(self, query, direction='es2yor', threshold=0.3):
         query_norm = self.normalize_text(query)
         query_tokens = set(query_norm.split())
         source_norm_key = 'espanol_norm' if direction == 'es2yor' else 'yoremnokki_norm'
-        
+
         results = []
         for item in self.data_cache:
             item_tokens = set(item[source_norm_key].split())
             intersection = query_tokens & item_tokens
             union = query_tokens | item_tokens
             jaccard = len(intersection) / len(union) if union else 0
-            
+
             if jaccard >= threshold:
                 results.append({
                     **item,
                     'jaccard_score': jaccard
                 })
-        
+
         results.sort(key=lambda x: x['jaccard_score'], reverse=True)
         return results
-    
-    def embedding_search(self, query, direction='es2yor', top_k=10):
+
+    def embedding_search(self, query, direction='es2yor', top_k=10, min_similarity=0.5):
         query_embedding = self.model.encode(query, convert_to_numpy=True)
-        embedding_key = 'esp_embedding' if direction == 'es2yor' else 'yor_embedding'
-        
-        similarities = []
-        for item in self.data_cache:
-            db_embedding = item[embedding_key]
-            similarity = np.dot(query_embedding, db_embedding) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(db_embedding)
-            )
-            similarities.append({
-                **item,
-                'embedding_score': float(similarity)
-            })
-        
-        similarities.sort(key=lambda x: x['embedding_score'], reverse=True)
-        return similarities[:top_k]
-    
+        # Convertir a 2D y normalizar (necesario para que el producto interno sea coseno)
+        query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
+        # ahora sí modifica el array 2D in-place
+        faiss.normalize_L2(query_embedding)
+
+        # Seleccionar índice según dirección
+        index = self.esp_index if direction == 'es2yor' else self.yor_index
+
+        # Range search: radio = min_similarity; devuelve todos los vectores con producto interno >= radio
+        lims, D, I = index.range_search(query_embedding, min_similarity)
+
+        results = []
+        # lims[0] = 0, luego límites para cada query (solo hay una)
+        for i in range(len(lims) - 1):
+            start, end = lims[i], lims[i+1]
+            for j in range(start, end):
+                db_id = I[j]
+                score = float(D[j])
+                item = self.data_cache[db_id]
+                results.append({
+                    **item,
+                    'embedding_score': score,
+                    'id': db_id
+                })
+
+        # Ordenar por score descendente y tomar top_k
+        results.sort(key=lambda x: x['embedding_score'], reverse=True)
+        return results[:top_k]
+
     def ngram_windows(self, tokens, max_n=3):
         windows = []
         n_tokens = len(tokens)
-        
+
         for n in range(min(max_n, n_tokens), 0, -1):
             for i in range(n_tokens - n + 1):
                 chunk_tokens = tokens[i:i+n]
                 chunk_text = ' '.join(chunk_tokens)
                 windows.append((i, i+n, chunk_text))
-        
+
         return windows
-    
+
     def compositional_translate(self, query, direction='es2yor', max_window=3):
         original_tokens = query.split()
         tokens_norm = self.normalize_text(query).split()
         n = len(tokens_norm)
-        
+
         if n == 0:
             return {'success': False, 'chunks': []}
-        
+
         covered = [False] * n
         chunks = []
-        
+
         windows = self.ngram_windows(tokens_norm, max_n=max_window)
-        
+
         for start_idx, end_idx, chunk_text in windows:
             if any(covered[start_idx:end_idx]):
                 continue
-            
+
             chunk_original = ' '.join(original_tokens[start_idx:end_idx])
-            
-            matches = self.exact_match(chunk_original, direction, allow_typos=True, max_edits=1)
-            
+
+            matches = self.exact_match(
+                chunk_original, direction, allow_typos=True, max_edits=1)
+
             if matches:
                 best = matches[0]
                 target_key = 'yoremnokki' if direction == 'es2yor' else 'espanol'
-                
+
                 chunks.append({
                     'start': start_idx,
                     'end': end_idx,
@@ -337,23 +390,23 @@ class YoremnokkilTranslator:
                     'match_type': best.get('match_type_original', 'exact'),
                     'confidence': 1.0 - (best.get('edit_distance', 0) * 0.1)
                 })
-                
+
                 for i in range(start_idx, end_idx):
                     covered[i] = True
-        
+
         for i in range(n):
             if not covered[i]:
                 token_original = original_tokens[i]
                 token_norm = tokens_norm[i]
-                
+
                 if direction == 'yor2es':
                     morph_result = self.morphological_split_search(
-                        token_original, 
-                        direction='yor2es', 
-                        min_ratio=0.45, 
+                        token_original,
+                        direction='yor2es',
+                        min_ratio=0.45,
                         fuzzy_threshold=0.90
                     )
-                    
+
                     if morph_result['found']:
                         best_split = morph_result['splits'][0]
                         chunks.append({
@@ -372,7 +425,7 @@ class YoremnokkilTranslator:
                         })
                         covered[i] = True
                         continue
-                
+
                 chunks.append({
                     'start': i,
                     'end': i + 1,
@@ -381,14 +434,14 @@ class YoremnokkilTranslator:
                     'match_type': 'unknown',
                     'confidence': 0.0
                 })
-        
+
         chunks.sort(key=lambda x: x['start'])
-        
+
         return {
             'success': any(c['match_type'] != 'unknown' for c in chunks),
             'chunks': chunks
         }
-    
+
     @lru_cache(maxsize=200)
     def corregir_gramatica_azure(self, texto_desordenado, client_id='default'):
         """Corrección gramatical con caché y rate limiting"""
@@ -398,7 +451,7 @@ class YoremnokkilTranslator:
                 'original': texto_desordenado,
                 'error': 'Azure OpenAI no configurado'
             }
-        
+
         # Rate limiting
         if not self.azure_rate_limiter.is_allowed(client_id):
             return {
@@ -406,10 +459,10 @@ class YoremnokkilTranslator:
                 'original': texto_desordenado,
                 'error': 'Rate limit excedido. Intenta en un minuto.'
             }
-        
+
         try:
             texto_clean = str(texto_desordenado).strip()
-            
+
             if not texto_clean:
                 return {
                     'corregida': None,
@@ -427,7 +480,7 @@ Reglas:
 - Responde SOLO con la frase corregida, sin explicaciones
 
 Corrige esta frase: {texto_clean}"""
-            
+
             response = self.azure_client.chat.completions.create(
                 model=str(self.azure_deployment),
                 messages=[
@@ -436,31 +489,31 @@ Corrige esta frase: {texto_clean}"""
                 max_completion_tokens=100,
                 timeout=10
             )
-            
+
             corregida = response.choices[0].message.content.strip()
-            
+
             return {
                 'corregida': corregida,
                 'original': texto_desordenado,
                 'error': None
             }
-            
+
         except Exception as e:
             error_msg = str(e)
-            
+
             if "404" in error_msg:
                 return {
                     'corregida': None,
                     'original': texto_desordenado,
                     'error': f"Deployment '{self.azure_deployment}' no encontrado"
                 }
-            
+
             return {
                 'corregida': None,
                 'original': texto_desordenado,
                 'error': 'Error en Azure OpenAI'
             }
-    
+
     def hybrid_search(self, query, direction='es2yor', top_k=5, client_id='default'):
         results = {
             'query': query,
@@ -470,9 +523,10 @@ Corrige esta frase: {texto_clean}"""
             'morphological': None,
             'alternatives': []
         }
-        
-        exact_matches = self.exact_match(query, direction, allow_typos=True, max_edits=1)
-        
+
+        exact_matches = self.exact_match(
+            query, direction, allow_typos=True, max_edits=1)
+
         if exact_matches:
             for match in exact_matches[:3]:
                 target_key = 'yoremnokki' if direction == 'es2yor' else 'espanol'
@@ -483,15 +537,18 @@ Corrige esta frase: {texto_clean}"""
                     'confidence': 1.0
                 })
             return results
-        
+
         if len(query.split()) > 1:
-            comp_result = self.compositional_translate(query, direction, max_window=3)
+            comp_result = self.compositional_translate(
+                query, direction, max_window=3)
             if comp_result['success']:
-                assembled = ' '.join([c['translation'] for c in comp_result['chunks']])
+                assembled = ' '.join([c['translation']
+                                     for c in comp_result['chunks']])
                 correccion = None
                 if direction == 'yor2es' and self.azure_client:
-                    correccion = self.corregir_gramatica_azure(assembled, client_id)
-                
+                    correccion = self.corregir_gramatica_azure(
+                        assembled, client_id)
+
                 results['compositional'] = {
                     'translation': assembled,
                     'translation_corrected': correccion['corregida'] if correccion and correccion['corregida'] else None,
@@ -500,10 +557,11 @@ Corrige esta frase: {texto_clean}"""
                     'has_unknowns': any(c['match_type'] == 'unknown' for c in comp_result['chunks'])
                 }
                 return results
-        
+
         if direction == 'yor2es' and len(query.split()) == 1:
-            morph_result = self.morphological_split_search(query, direction, min_ratio=0.45, fuzzy_threshold=0.90)
-            
+            morph_result = self.morphological_split_search(
+                query, direction, min_ratio=0.45, fuzzy_threshold=0.90)
+
             if morph_result['found']:
                 best_split = morph_result['splits'][0]
                 results['morphological'] = {
@@ -517,12 +575,13 @@ Corrige esta frase: {texto_clean}"""
                     'score': best_split['score']
                 }
                 return results
-        
+
         fuzzy_matches = self.fuzzy_token_match(query, direction, threshold=0.4)
-        embedding_matches = self.embedding_search(query, direction, top_k=top_k*2)
-        
+        embedding_matches = self.embedding_search(
+            query, direction, top_k=top_k*2)  # ya filtra >=0.5
+
         combined = {}
-        
+
         for item in fuzzy_matches[:10]:
             key = item['id']
             combined[key] = {
@@ -532,7 +591,7 @@ Corrige esta frase: {texto_clean}"""
                 'score': 0.7 + (item['jaccard_score'] * 0.3),
                 'match_type': 'fuzzy_token'
             }
-        
+
         for item in embedding_matches:
             key = item['id']
             if key not in combined:
@@ -543,9 +602,13 @@ Corrige esta frase: {texto_clean}"""
                     'score': item['embedding_score'] * 0.6,
                     'match_type': 'embedding'
                 }
-        
-        alternatives = sorted(combined.values(), key=lambda x: x['score'], reverse=True)[:top_k]
-        
+
+        # Ordenar y filtrar por score >= 0.5 (solo mostramos traducciones con al menos 50% de confianza)
+        alternatives = sorted(
+            combined.values(), key=lambda x: x['score'], reverse=True)
+        alternatives = [
+            alt for alt in alternatives if alt['score'] >= 0.5][:top_k]
+
         for alt in alternatives:
             results['alternatives'].append({
                 'source': alt['espanol'] if direction == 'es2yor' else alt['yoremnokki'],
@@ -553,8 +616,9 @@ Corrige esta frase: {texto_clean}"""
                 'score': alt['score'],
                 'match_type': alt['match_type']
             })
-        
+
         return results
+
 
 # Inicializar Flask
 app = Flask(__name__)
@@ -564,11 +628,13 @@ translator = None
 # Rate limiter global para requests HTTP
 request_limiter = RateLimiter(max_calls=100, period=60)
 
+
 def get_client_ip():
     """Obtener IP del cliente (funciona detrás de proxies)"""
     if request.headers.get('X-Forwarded-For'):
         return request.headers.get('X-Forwarded-For').split(',')[0]
     return request.remote_addr
+
 
 @app.before_request
 def rate_limit_check():
@@ -577,25 +643,29 @@ def rate_limit_check():
     if not request_limiter.is_allowed(client_ip):
         return jsonify({'error': 'Demasiadas peticiones. Espera un minuto.'}), 429
 
+
 @app.route('/')
 def index():
     return render_template('index.html', total_pairs=translator.total_pairs, embedding_dim=translator.embedding_dim)
+
 
 @app.route('/translate', methods=['POST'])
 def translate():
     data = request.get_json()
     query = data.get('query', '').strip()
     direction = data.get('direction', 'es2yor')
-    
+
     if not query:
         return jsonify({'error': 'Query vacío'}), 400
-    
+
     if len(query) > 500:
         return jsonify({'error': 'Query demasiado largo (máx 500 caracteres)'}), 400
-    
+
     client_ip = get_client_ip()
-    results = translator.hybrid_search(query, direction=direction, top_k=5, client_id=client_ip)
+    results = translator.hybrid_search(
+        query, direction=direction, top_k=5, client_id=client_ip)
     return jsonify(results)
+
 
 @app.route('/stats', methods=['GET'])
 def stats():
@@ -604,16 +674,19 @@ def stats():
         'embedding_dim': translator.embedding_dim
     })
 
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint para Railway"""
     return jsonify({'status': 'ok', 'service': 'yoremnokki-translator'}), 200
 
+
 possible_paths = [
     'traductor_assets/traductor_yoremnokki.db',
     'traductor_yoremnokki.db',
     './traductor_yoremnokki.db',
-    os.getenv("DATABASE_PATH", ""),   # opcional: permitir ruta por variable de entorno
+    # opcional: permitir ruta por variable de entorno
+    os.getenv("DATABASE_PATH", ""),
 ]
 
 db_path = None
