@@ -55,7 +55,8 @@ class RateLimiter:
         while len(self.calls) > self.max_ips:
             self.calls.popitem(last=False)
         
-        print(f"🧹 Cleanup: {len(expired_ips)} IPs expiradas, {len(self.calls)} activas")
+        if expired_ips:
+            print(f"🧹 Cleanup: {len(expired_ips)} IPs expiradas, {len(self.calls)} activas")
     
     def is_allowed(self, client_id):
         with self.lock:
@@ -288,196 +289,299 @@ class YoremnokkilTranslator:
                         matches.append(
                             {**item, 'edit_distance': dist, 'match_type_original': 'typo'})
 
-        matches_sorted = sorted(matches, key=lambda x: x['edit_distance'])
-        return matches_sorted
+        matches.sort(key=lambda x: x.get('edit_distance', 0))
+        return matches
 
-    def fuzzy_token_match(self, query, direction='es2yor', threshold=0.4):
-        query_tokens = set(query.lower().split())
-        source_key = 'espanol' if direction == 'es2yor' else 'yoremnokki'
-
-        candidates = []
-        for item in self.data_cache:
-            source_tokens = set(item[source_key].lower().split())
-            intersection = len(query_tokens & source_tokens)
-            union = len(query_tokens | source_tokens)
-            if union > 0:
-                jaccard = intersection / union
-                if jaccard >= threshold:
-                    candidates.append({**item, 'jaccard_score': jaccard})
-
-        candidates_sorted = sorted(
-            candidates, key=lambda x: x['jaccard_score'], reverse=True)
-        return candidates_sorted
-
-    def embedding_search(self, query, direction='es2yor', top_k=5):
-        query_emb = self.model.encode([query])[0]
-        query_emb = query_emb.reshape(1, -1)
-        faiss.normalize_L2(query_emb)
-
-        index = self.esp_index if direction == 'es2yor' else self.yor_index
-        D, I = index.search(query_emb, top_k * 3)
-
-        results = []
-        for dist, idx in zip(D[0], I[0]):
-            if idx == -1:
-                continue
-            item = self.data_cache[int(idx)]
-            if dist >= 0.5:
-                results.append({**item, 'embedding_score': float(dist)})
-
-        results_sorted = sorted(
-            results, key=lambda x: x['embedding_score'], reverse=True)
-        return results_sorted[:top_k]
-
-    def compositional_translate(self, query, direction='es2yor', max_window=3):
-        words = query.split()
-        n = len(words)
-
-        chunks = []
-        i = 0
-        while i < n:
-            best_chunk = None
-            best_window = 1
-
-            for w in range(max_window, 0, -1):
-                if i + w > n:
-                    continue
-                window_text = ' '.join(words[i:i+w])
-                match = self.exact_match(window_text, direction, allow_typos=True)
-                if match:
-                    target_key = 'yoremnokki' if direction == 'es2yor' else 'espanol'
-                    best_chunk = {
-                        'original': window_text,
-                        'translation': match[0][target_key],
-                        'match_type': 'exact',
-                        'window_size': w
-                    }
-                    best_window = w
-                    break
-
-            if not best_chunk:
-                fuzzy_matches = self.fuzzy_token_match(
-                    words[i], direction, threshold=0.5)
-                if fuzzy_matches:
-                    target_key = 'yoremnokki' if direction == 'es2yor' else 'espanol'
-                    best_chunk = {
-                        'original': words[i],
-                        'translation': fuzzy_matches[0][target_key],
-                        'match_type': 'fuzzy',
-                        'window_size': 1
-                    }
-                else:
-                    best_chunk = {
-                        'original': words[i],
-                        'translation': f"[?{words[i]}?]",
-                        'match_type': 'unknown',
-                        'window_size': 1
-                    }
-
-            chunks.append(best_chunk)
-            i += best_window
-
-        return {'success': True, 'chunks': chunks}
-
-    def morphological_split_search(self, word, direction='yor2es', min_ratio=0.45, fuzzy_threshold=0.90):
-        results = []
-        n = len(word)
-
-        for i in range(1, n):
-            part1 = word[:i]
-            part2 = word[i:]
-
-            if len(part1) < 2 or len(part2) < 2:
-                continue
-
-            exact_p1 = self.exact_match(part1, direction, allow_typos=False)
-            exact_p2 = self.exact_match(part2, direction, allow_typos=False)
-
-            if exact_p1 and exact_p2:
-                target_key = 'espanol' if direction == 'yor2es' else 'yoremnokki'
-                p1_trans = exact_p1[0][target_key]
-                p2_trans = exact_p2[0][target_key]
-
-                results.append({
-                    'part1': part1,
-                    'part2': part2,
-                    'part1_translation': p1_trans,
-                    'part2_translation': p2_trans,
-                    'combined_translation': f"{p1_trans} {p2_trans}",
-                    'part1_similarity': 1.0,
-                    'part1_exact': True,
-                    'score': 1.0
-                })
-                continue
-
-            if not exact_p1:
-                fuzzy_p1 = self.embedding_search(part1, direction, top_k=1)
-                if fuzzy_p1 and fuzzy_p1[0]['embedding_score'] >= fuzzy_threshold:
-                    exact_p2 = self.exact_match(part2, direction, allow_typos=False)
-                    if exact_p2:
-                        target_key = 'espanol' if direction == 'yor2es' else 'yoremnokki'
-                        p1_trans = fuzzy_p1[0][target_key]
-                        p2_trans = exact_p2[0][target_key]
-
-                        results.append({
-                            'part1': part1,
-                            'part2': part2,
-                            'part1_translation': p1_trans,
-                            'part2_translation': p2_trans,
-                            'combined_translation': f"{p1_trans} {p2_trans}",
-                            'part1_similarity': fuzzy_p1[0]['embedding_score'],
-                            'part1_exact': False,
-                            'score': fuzzy_p1[0]['embedding_score']
-                        })
-
-        if results:
-            results_sorted = sorted(results, key=lambda x: x['score'], reverse=True)
-            return {'found': True, 'splits': results_sorted}
-        else:
+    def morphological_split_search(self, word, direction='es2yor', min_ratio=0.45, fuzzy_threshold=0.90):
+        if direction != 'yor2es':
             return {'found': False, 'splits': []}
 
-    def corregir_gramatica_azure(self, texto_desordenado, client_id='default'):
-        if not self.azure_client:
-            return {'corregida': None, 'original': texto_desordenado, 'error': 'Azure no configurado'}
+        word_norm = self.normalize_text(word)
+        word_len = len(word_norm)
 
+        if word_len < 4:
+            return {'found': False, 'splits': []}
+
+        valid_splits = []
+        source_norm_key = 'yoremnokki_norm'
+        target_key = 'espanol'
+
+        for split_pos in range(int(word_len * min_ratio), int(word_len * 0.95) + 1):
+            part1_norm = word_norm[:split_pos]
+            part2_norm = word_norm[split_pos:]
+
+            if len(part1_norm) < 1 or len(part2_norm) < 1:
+                continue
+
+            part2_matches = []
+            for item in self.data_cache:
+                if item[source_norm_key] == part2_norm:
+                    part2_matches.append(item)
+
+            if not part2_matches:
+                continue
+
+            part1_candidates = []
+            for item in self.data_cache:
+                item_norm = item[source_norm_key]
+
+                if item_norm == part1_norm:
+                    part1_candidates.append({
+                        'item': item,
+                        'similarity': 1.0,
+                        'is_exact': True
+                    })
+                else:
+                    max_len = max(len(item_norm), len(part1_norm))
+                    if max_len == 0:
+                        continue
+
+                    lev_dist = self.levenshtein_distance(item_norm, part1_norm)
+                    similarity = 1.0 - (lev_dist / max_len)
+
+                    if similarity >= fuzzy_threshold:
+                        part1_candidates.append({
+                            'item': item,
+                            'similarity': similarity,
+                            'is_exact': False
+                        })
+
+            for p1_cand in part1_candidates:
+                for p2_match in part2_matches:
+                    combined_translation = f"{p1_cand['item'][target_key]} {p2_match[target_key]}"
+
+                    score = p1_cand['similarity'] * 0.7 + 0.3
+
+                    valid_splits.append({
+                        'part1': p1_cand['item'][source_norm_key],
+                        'part2': p2_match[source_norm_key],
+                        'part1_translation': p1_cand['item'][target_key],
+                        'part2_translation': p2_match[target_key],
+                        'combined_translation': combined_translation,
+                        'part1_similarity': p1_cand['similarity'],
+                        'part1_exact': p1_cand['is_exact'],
+                        'part2_exact': True,
+                        'score': score,
+                        'split_position': split_pos
+                    })
+
+        valid_splits.sort(key=lambda x: x['score'], reverse=True)
+
+        return {
+            'found': len(valid_splits) > 0,
+            'splits': valid_splits[:3]
+        }
+
+    def fuzzy_token_match(self, query, direction='es2yor', threshold=0.3):
+        query_norm = self.normalize_text(query)
+        query_tokens = set(query_norm.split())
+        source_norm_key = 'espanol_norm' if direction == 'es2yor' else 'yoremnokki_norm'
+
+        results = []
+        for item in self.data_cache:
+            item_tokens = set(item[source_norm_key].split())
+            intersection = query_tokens & item_tokens
+            union = query_tokens | item_tokens
+            jaccard = len(intersection) / len(union) if union else 0
+
+            if jaccard >= threshold:
+                results.append({
+                    **item,
+                    'jaccard_score': jaccard
+                })
+
+        results.sort(key=lambda x: x['jaccard_score'], reverse=True)
+        return results
+
+    def embedding_search(self, query, direction='es2yor', top_k=10, min_similarity=0.5):
+        query_embedding = self.model.encode(query, convert_to_numpy=True)
+        # Convertir a 2D y normalizar (necesario para que el producto interno sea coseno)
+        query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
+        # ahora sí modifica el array 2D in-place
+        faiss.normalize_L2(query_embedding)
+
+        # Seleccionar índice según dirección
+        index = self.esp_index if direction == 'es2yor' else self.yor_index
+
+        # Range search: radio = min_similarity; devuelve todos los vectores con producto interno >= radio
+        lims, D, I = index.range_search(query_embedding, min_similarity)
+
+        results = []
+        # lims[0] = 0, luego límites para cada query (solo hay una)
+        for i in range(len(lims) - 1):
+            start, end = lims[i], lims[i+1]
+            for j in range(start, end):
+                db_id = I[j]
+                score = float(D[j])
+                item = self.data_cache[db_id]
+                results.append({
+                    **item,
+                    'embedding_score': score,
+                    'id': db_id
+                })
+
+        # Ordenar por score descendente y tomar top_k
+        results.sort(key=lambda x: x['embedding_score'], reverse=True)
+        return results[:top_k]
+
+    def ngram_windows(self, tokens, max_n=3):
+        windows = []
+        n_tokens = len(tokens)
+
+        for n in range(min(max_n, n_tokens), 0, -1):
+            for i in range(n_tokens - n + 1):
+                chunk_tokens = tokens[i:i+n]
+                chunk_text = ' '.join(chunk_tokens)
+                windows.append((i, i+n, chunk_text))
+
+        return windows
+
+    def compositional_translate(self, query, direction='es2yor', max_window=3):
+        original_tokens = query.split()
+        tokens_norm = self.normalize_text(query).split()
+        n = len(tokens_norm)
+
+        if n == 0:
+            return {'success': False, 'chunks': []}
+
+        covered = [False] * n
+        chunks = []
+
+        windows = self.ngram_windows(tokens_norm, max_n=max_window)
+
+        for start_idx, end_idx, chunk_text in windows:
+            if any(covered[start_idx:end_idx]):
+                continue
+
+            chunk_original = ' '.join(original_tokens[start_idx:end_idx])
+
+            matches = self.exact_match(
+                chunk_original, direction, allow_typos=True, max_edits=1)
+
+            if matches:
+                best = matches[0]
+                target_key = 'yoremnokki' if direction == 'es2yor' else 'espanol'
+
+                chunks.append({
+                    'start': start_idx,
+                    'end': end_idx,
+                    'source': chunk_original,
+                    'translation': best[target_key],
+                    'match_type': best.get('match_type_original', 'exact'),
+                    'confidence': 1.0 - (best.get('edit_distance', 0) * 0.1)
+                })
+
+                for i in range(start_idx, end_idx):
+                    covered[i] = True
+
+        for i in range(n):
+            if not covered[i]:
+                token_original = original_tokens[i]
+                token_norm = tokens_norm[i]
+
+                if direction == 'yor2es':
+                    morph_result = self.morphological_split_search(
+                        token_original,
+                        direction='yor2es',
+                        min_ratio=0.45,
+                        fuzzy_threshold=0.90
+                    )
+
+                    if morph_result['found']:
+                        best_split = morph_result['splits'][0]
+                        chunks.append({
+                            'start': i,
+                            'end': i + 1,
+                            'source': token_original,
+                            'translation': best_split['combined_translation'],
+                            'match_type': 'morphological',
+                            'confidence': best_split['score'],
+                            'morphological_detail': {
+                                'part1': best_split['part1'],
+                                'part2': best_split['part2'],
+                                'part1_translation': best_split['part1_translation'],
+                                'part2_translation': best_split['part2_translation']
+                            }
+                        })
+                        covered[i] = True
+                        continue
+
+                chunks.append({
+                    'start': i,
+                    'end': i + 1,
+                    'source': token_original,
+                    'translation': f"[{token_original}]",
+                    'match_type': 'unknown',
+                    'confidence': 0.0
+                })
+
+        chunks.sort(key=lambda x: x['start'])
+
+        return {
+            'success': any(c['match_type'] != 'unknown' for c in chunks),
+            'chunks': chunks
+        }
+
+    @lru_cache(maxsize=200)
+    def corregir_gramatica_azure(self, texto_desordenado, client_id='default'):
+        """Corrección gramatical con caché y rate limiting"""
+        if not self.azure_client:
+            return {
+                'corregida': None,
+                'original': texto_desordenado,
+                'error': 'Azure OpenAI no configurado'
+            }
+
+        # Rate limiting
         if not self.azure_rate_limiter.is_allowed(client_id):
             return {
                 'corregida': None,
                 'original': texto_desordenado,
-                'error': 'Rate limit excedido para Azure API'
+                'error': 'Rate limit excedido. Intenta en un minuto.'
             }
 
         try:
-            prompt = f"""Eres un corrector gramatical del idioma español. Tu tarea es corregir SOLO la gramática y orden de las palabras.
+            texto_clean = str(texto_desordenado).strip()
 
-REGLAS ESTRICTAS:
-- NO traduzcas palabras entre idiomas
-- NO reemplaces palabras indígenas con equivalentes en español
-- SOLO corrige el orden de las palabras y la gramática
-- Si una frase ya está gramaticalmente correcta, devuélvela sin cambios
-- Mantén TODAS las palabras originales
+            if not texto_clean:
+                return {
+                    'corregida': None,
+                    'original': texto_desordenado,
+                    'error': 'Texto vacío'
+                }
 
-Texto a corregir: "{texto_desordenado}"
+            user_prompt = f"""Eres un corrector gramatical especializado en español. 
+Tu tarea es reorganizar palabras desordenadas en frases gramaticalmente correctas, preservando el significado exacto.
 
-Responde ÚNICAMENTE con la versión corregida, sin explicaciones adicionales."""
+Reglas:
+- si dice él mujer se refiere a ella, si dice ella hombre se refiere a él.
+- reorganiza y agrega artículos/preposiciones necesarios (a, de, el, la, etc.)
+- Si hay símbolos como '+' interprétalos como separadores
+- Responde SOLO con la frase corregida, sin explicaciones
+
+Corrige esta frase: {texto_clean}"""
 
             response = self.azure_client.chat.completions.create(
-                model=self.azure_deployment,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=200,
-                temperature=0.3
+                model=str(self.azure_deployment),
+                messages=[
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_completion_tokens=100,
+                timeout=10
             )
 
-            texto_corregido = response.choices[0].message.content.strip()
+            corregida = response.choices[0].message.content.strip()
+
             return {
-                'corregida': texto_corregido,
+                'corregida': corregida,
                 'original': texto_desordenado,
                 'error': None
             }
 
         except Exception as e:
             error_msg = str(e)
-            if 'DeploymentNotFound' in error_msg or '404' in error_msg:
+
+            if "404" in error_msg:
                 return {
                     'corregida': None,
                     'original': texto_desordenado,
