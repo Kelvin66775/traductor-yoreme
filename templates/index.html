@@ -20,10 +20,10 @@
         <div class="main-card">
             <div class="direction-selector">
                 <button class="direction-btn active" data-direction="es2yor">
-                    Español → Yoremnokki
+                    Español → Yoreme
                 </button>
                 <button class="direction-btn" data-direction="yor2es">
-                    Yoremnokki → Español
+                    Yoreme → Español
                 </button>
             </div>
 
@@ -45,21 +45,11 @@
             </div>
         </div>
 
-        <div class="stats-card">
-            <h2>Estadísticas del Sistema</h2>
-            <div class="stats-grid">
-                <div class="stat-item">
-                    <div class="stat-number" id="totalPairs">{{ total_pairs }}</div>
-                    <div class="stat-label">Pares de traducción</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-number">{{ embedding_dim }}</div>
-                    <div class="stat-label">Dimensión de embeddings</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-number">5</div>
-                    <div class="stat-label">Algoritmos de búsqueda</div>
-                </div>
+        <!-- 👇 Historial de búsqueda en lugar de estadísticas -->
+        <div class="history-card" id="historyCard">
+            <h2>Historial de búsquedas</h2>
+            <div id="historyList" class="history-list">
+                <p class="history-empty">Aún no has hecho ninguna búsqueda.</p>
             </div>
             <div class="deer-footer">
                 <span>🦌</span> Traductor yoreme · Nativa Solutions <span>🦌</span>
