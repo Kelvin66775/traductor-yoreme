@@ -1,10 +1,20 @@
-flask==3.0.0
-sentence-transformers==2.7.0
-numpy==1.26.4
-torch==2.2.1
-transformers==4.38.0
+# Requirements optimizados para Railway (1GB RAM)
+Flask==3.0.0
 gunicorn==21.2.0
-setuptools==69.0.0
-openai==2.33.0
-faiss-cpu
-psutil
+gevent==23.9.1  # Para worker_class='gevent' (mejor I/O concurrente)
+
+# ML/NLP (versiones específicas para evitar bloat)
+sentence-transformers==2.2.2
+transformers==4.35.0
+torch==2.1.0  # CPU-only, sin CUDA
+faiss-cpu==1.7.4  # CPU-only, no GPU
+
+# Azure OpenAI
+openai==1.12.0
+
+# Utilities
+numpy==1.24.3
+psutil==5.9.6  # Para monitoreo de memoria
+
+# Opcional: Si quieres usar gthread en lugar de gevent
+# (no requiere instalación adicional, viene con gunicorn)

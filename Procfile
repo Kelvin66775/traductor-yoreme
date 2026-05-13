@@ -1,1 +1,3 @@
-web: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+# Procfile para Railway
+# Usa gunicorn_config.py para configuración
+web: gunicorn app:app --config gunicorn_config.py
