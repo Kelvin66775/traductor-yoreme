@@ -287,7 +287,7 @@ class YoremnokkilTranslator:
         """Carga todos los pares en memoria para búsqueda rápida."""
         with self.db_pool.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, espanol, yoremnokki, esp_embedding, yor_embedding FROM translations")
+            cursor.execute("SELECT id, espanol, yoremnokki, esp_embedding, yor_embedding FROM traducciones")
             rows = cursor.fetchall()
             
             # Procesar datos con numpy para eficiencia
