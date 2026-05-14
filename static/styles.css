@@ -694,6 +694,23 @@ body::after {
     font-size: 1.2rem;
 }
 
+.chunk {
+    display: inline-block;
+    background: #f0f0f0;
+    padding: 4px 10px;
+    margin: 4px;
+    border-radius: 20px;
+    font-size: 0.9rem;
+}
+.chunk-known {
+    background: #e3f2fd;
+    color: #0d47a1;
+}
+.chunk-unknown {
+    background: #ffebee;
+    color: #b71c1c;
+    text-decoration: line-through;
+}
 
 @media (max-width: 600px) {
     body {
