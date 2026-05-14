@@ -1,7 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 import sqlite3
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from pathlib import Path
 import unicodedata
 import re
@@ -11,14 +10,13 @@ from functools import lru_cache
 import time
 from threading import Lock
 import sys
+import gc
 import faiss
 
 # ------------------------------------------------------------
 # Rate limiter con limpieza automática de entradas antiguas
 # ------------------------------------------------------------
 class RateLimiter:
-    """Rate limiter para prevenir abuso de la API (con cleanup)"""
-
     def __init__(self, max_calls=30, period=60):
         self.max_calls = max_calls
         self.period = period
@@ -26,10 +24,8 @@ class RateLimiter:
         self.lock = Lock()
 
     def _cleanup(self, now):
-        """Elimina entradas que expiraron"""
         expired = []
         for client_id, timestamps in self.calls.items():
-            # Filtramos timestamps que sigan dentro del período
             valid = [t for t in timestamps if now - t < self.period]
             if valid:
                 self.calls[client_id] = valid
@@ -50,7 +46,7 @@ class RateLimiter:
             return True
 
 # ------------------------------------------------------------
-# Traductor principal (con lazy loading)
+# Traductor principal
 # ------------------------------------------------------------
 class YoremnokkilTranslator:
     def __init__(self, db_path):
@@ -59,14 +55,12 @@ class YoremnokkilTranslator:
         self._init_lock = Lock()
         self._initialized = False
 
-        # Metadatos ligeros (no cargan embeddings ni modelo)
         cursor = self.conn.cursor()
         cursor.execute("SELECT value FROM metadata WHERE key='embedding_dim'")
         self.embedding_dim = int(cursor.fetchone()[0])
         cursor.execute("SELECT value FROM metadata WHERE key='total_pairs'")
         self.total_pairs = int(cursor.fetchone()[0])
 
-        # Configuración de Azure OpenAI (ligera)
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "")
         azure_key = os.getenv("AZURE_OPENAI_KEY", "")
         azure_deployment = os.getenv("AZURE_DEPLOYMENT", "gpt-4.1-mini")
@@ -96,8 +90,7 @@ class YoremnokkilTranslator:
         else:
             print("⚠ Azure OpenAI no configurado (sin corrección gramatical)")
 
-        # Estas estructuras se llenarán en _lazy_init()
-        self.espanol_raw = None      # lista de str
+        self.espanol_raw = None
         self.yoremnokki_raw = None
         self.espanol_norm = None
         self.yoremnokki_norm = None
@@ -106,10 +99,21 @@ class YoremnokkilTranslator:
         self.model = None
 
     # --------------------------------------------------------
-    # Carga real de recursos pesados (modelo + índices)
+    # Paths para índices FAISS serializados
+    # --------------------------------------------------------
+    def _index_paths(self):
+        base = Path(self.db_path).parent
+        return (
+            base / "faiss_esp.index",
+            base / "faiss_yor.index",
+            base / "faiss_texts.npz"
+        )
+
+    # --------------------------------------------------------
+    # Carga lazy: intenta leer índices desde disco, si no los
+    # construye UNA sola vez y los persiste para arranques futuros
     # --------------------------------------------------------
     def _lazy_init(self):
-        """Carga el modelo, embeddings y construye índices FAISS (solo una vez)"""
         if self._initialized:
             return
 
@@ -117,73 +121,115 @@ class YoremnokkilTranslator:
             if self._initialized:
                 return
 
-            print("🔧 Cargando modelo SentenceTransformer (all-MiniLM-L6-v2)...")
-            model_cache_dir = os.getenv("SENTENCE_TRANSFORMERS_HOME", "./model_cache")
-            os.makedirs(model_cache_dir, exist_ok=True)
-            try:
-                self.model = SentenceTransformer('all-MiniLM-L6-v2', cache_folder=model_cache_dir)
-            except Exception as e:
-                print(f"❌ Error cargando modelo: {e}")
-                raise RuntimeError("No se pudo cargar el modelo. Revisa conexión a internet o el nombre.") from e
-            print("✓ Modelo cargado")
+            esp_path, yor_path, txt_path = self._index_paths()
+            indexes_on_disk = esp_path.exists() and yor_path.exists() and txt_path.exists()
 
-            print("📖 Leyendo base de datos y construyendo índices FAISS...")
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "SELECT espanol, yoremnokki, esp_embedding, yor_embedding FROM traducciones"
+            if indexes_on_disk:
+                print("📂 Cargando índices FAISS desde disco (sin reconstruir)...")
+                self.esp_index = faiss.read_index(str(esp_path))
+                self.yor_index = faiss.read_index(str(yor_path))
+
+                data = np.load(str(txt_path), allow_pickle=True)
+                self.espanol_raw    = data["espanol_raw"].tolist()
+                self.yoremnokki_raw = data["yoremnokki_raw"].tolist()
+                self.espanol_norm   = data["espanol_norm"].tolist()
+                self.yoremnokki_norm= data["yoremnokki_norm"].tolist()
+                print(f"✓ Índices cargados desde disco ({self.total_pairs} pares)")
+
+                # Importar SentenceTransformer solo cuando hace falta
+                self._load_sentence_transformer()
+
+                self._initialized = True
+                return
+
+            # Primera vez: construir y persistir
+            self._build_and_persist_indexes(esp_path, yor_path, txt_path)
+
+    def _load_sentence_transformer(self):
+        """Importa y carga SentenceTransformer de forma diferida."""
+        if self.model is not None:
+            return
+        # Importación diferida: PyTorch no se carga hasta este momento
+        from sentence_transformers import SentenceTransformer as ST
+        model_cache_dir = os.getenv("SENTENCE_TRANSFORMERS_HOME", "./model_cache")
+        os.makedirs(model_cache_dir, exist_ok=True)
+        print("🔧 Cargando modelo SentenceTransformer (all-MiniLM-L6-v2)...")
+        try:
+            self.model = ST('all-MiniLM-L6-v2', cache_folder=model_cache_dir)
+        except Exception as e:
+            print(f"❌ Error cargando modelo: {e}")
+            raise RuntimeError("No se pudo cargar el modelo.") from e
+        print("✓ Modelo cargado")
+
+    def _build_and_persist_indexes(self, esp_path, yor_path, txt_path):
+        """Construye índices FAISS desde la DB y los guarda en disco."""
+        self._load_sentence_transformer()
+
+        print("📖 Construyendo índices FAISS desde base de datos...")
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT espanol, yoremnokki, esp_embedding, yor_embedding FROM traducciones"
+        )
+
+        esp_raw_list = []
+        yor_raw_list = []
+        esp_norm_list = []
+        yor_norm_list = []
+        esp_emb_list = []
+        yor_emb_list = []
+
+        for row in cursor.fetchall():
+            esp_raw, yor_raw, esp_blob, yor_blob = row
+            esp_raw_list.append(esp_raw)
+            yor_raw_list.append(yor_raw)
+            esp_norm_list.append(self.normalize_text(esp_raw))
+            yor_norm_list.append(self.normalize_text(yor_raw))
+            esp_emb_list.append(np.frombuffer(esp_blob, dtype=np.float32))
+            yor_emb_list.append(np.frombuffer(yor_blob, dtype=np.float32))
+
+        self.espanol_raw    = esp_raw_list
+        self.yoremnokki_raw = yor_raw_list
+        self.espanol_norm   = esp_norm_list
+        self.yoremnokki_norm= yor_norm_list
+
+        esp_embs = np.array(esp_emb_list, dtype=np.float32)
+        yor_embs = np.array(yor_emb_list, dtype=np.float32)
+        del esp_emb_list, yor_emb_list
+        gc.collect()
+
+        faiss.normalize_L2(esp_embs)
+        faiss.normalize_L2(yor_embs)
+
+        dim = self.embedding_dim
+        ids = np.arange(len(esp_raw_list), dtype=np.int64)
+
+        self.esp_index = faiss.IndexIDMap(faiss.IndexFlatIP(dim))
+        self.yor_index = faiss.IndexIDMap(faiss.IndexFlatIP(dim))
+        self.esp_index.add_with_ids(esp_embs, ids)
+        self.yor_index.add_with_ids(yor_embs, ids)
+        del esp_embs, yor_embs
+        gc.collect()
+
+        # Persistir índices en disco para arranques futuros
+        try:
+            faiss.write_index(self.esp_index, str(esp_path))
+            faiss.write_index(self.yor_index, str(yor_path))
+            np.savez_compressed(
+                str(txt_path),
+                espanol_raw    = np.array(esp_raw_list,  dtype=object),
+                yoremnokki_raw = np.array(yor_raw_list,  dtype=object),
+                espanol_norm   = np.array(esp_norm_list, dtype=object),
+                yoremnokki_norm= np.array(yor_norm_list, dtype=object),
             )
+            print("✓ Índices persistidos en disco (próximos arranques serán más rápidos y ligeros)")
+        except Exception as e:
+            print(f"⚠ No se pudieron guardar índices en disco: {e}")
 
-            # Listas para textos
-            esp_raw_list = []
-            yor_raw_list = []
-            esp_norm_list = []
-            yor_norm_list = []
-
-            # Arrays para embeddings (temporal)
-            esp_emb_list = []
-            yor_emb_list = []
-
-            for row in cursor.fetchall():
-                esp_raw, yor_raw, esp_blob, yor_blob = row
-                esp_raw_list.append(esp_raw)
-                yor_raw_list.append(yor_raw)
-                # Normalización
-                esp_norm_list.append(self.normalize_text(esp_raw))
-                yor_norm_list.append(self.normalize_text(yor_raw))
-                # Embeddings
-                esp_emb_list.append(np.frombuffer(esp_blob, dtype=np.float32))
-                yor_emb_list.append(np.frombuffer(yor_blob, dtype=np.float32))
-
-            self.espanol_raw = esp_raw_list
-            self.yoremnokki_raw = yor_raw_list
-            self.espanol_norm = esp_norm_list
-            self.yoremnokki_norm = yor_norm_list
-
-            # Convertir a arrays numpy y normalizar para FAISS
-            esp_embs = np.array(esp_emb_list, dtype=np.float32)
-            yor_embs = np.array(yor_emb_list, dtype=np.float32)
-
-            # Normalización L2 (producto interno = similitud coseno)
-            faiss.normalize_L2(esp_embs)
-            faiss.normalize_L2(yor_embs)
-
-            # Crear índices con IDMap (FlatIP para similitud coseno)
-            dim = self.embedding_dim
-            self.esp_index = faiss.IndexIDMap(faiss.IndexFlatIP(dim))
-            self.yor_index = faiss.IndexIDMap(faiss.IndexFlatIP(dim))
-
-            ids = np.arange(len(esp_raw_list))
-            self.esp_index.add_with_ids(esp_embs, ids)
-            self.yor_index.add_with_ids(yor_embs, ids)
-
-            # Liberar arrays temporales
-            del esp_emb_list, yor_emb_list, esp_embs, yor_embs
-
-            self._initialized = True
-            print(f"✓ Índices FAISS construidos ({self.total_pairs} pares)")
+        self._initialized = True
+        print(f"✓ Índices FAISS construidos ({self.total_pairs} pares)")
 
     # --------------------------------------------------------
-    # Métodos auxiliares (normalización, distancia, etc.)
+    # Métodos auxiliares
     # --------------------------------------------------------
     def normalize_text(self, text):
         text = text.lower()
@@ -210,63 +256,44 @@ class YoremnokkilTranslator:
         return previous_row[-1]
 
     # --------------------------------------------------------
-    # Búsqueda exacta (con tolerancia a tildes/typos)
+    # Búsqueda exacta
     # --------------------------------------------------------
     def exact_match(self, query, direction='es2yor', allow_typos=False, max_edits=1):
-        """Retorna lista de coincidencias exactas o con typo (máx 3)"""
         self._lazy_init()
         query_norm = self.normalize_text(query)
-        source_raw = self.espanol_raw if direction == 'es2yor' else self.yoremnokki_raw
-        source_norm = self.espanol_norm if direction == 'es2yor' else self.yoremnokki_norm
-        target_raw = self.yoremnokki_raw if direction == 'es2yor' else self.espanol_raw
+        source_raw  = self.espanol_raw    if direction == 'es2yor' else self.yoremnokki_raw
+        source_norm = self.espanol_norm   if direction == 'es2yor' else self.yoremnokki_norm
+        target_raw  = self.yoremnokki_raw if direction == 'es2yor' else self.espanol_raw
 
         matches = []
-        # 1. Coincidencia exacta (incluyendo mayúsculas/tildes)
         for idx, txt in enumerate(source_raw):
             if txt.lower() == query.lower():
-                matches.append({
-                    'id': idx,
-                    'source': txt,
-                    'target': target_raw[idx],
-                    'edit_distance': 0,
-                    'match_type': 'original_acento'
-                })
+                matches.append({'id': idx, 'source': txt, 'target': target_raw[idx],
+                                'edit_distance': 0, 'match_type': 'original_acento'})
         if matches:
             return matches[:3]
 
-        # 2. Coincidencia normalizada
         for idx, norm in enumerate(source_norm):
             if norm == query_norm:
-                matches.append({
-                    'id': idx,
-                    'source': source_raw[idx],
-                    'target': target_raw[idx],
-                    'edit_distance': 0,
-                    'match_type': 'normalized'
-                })
+                matches.append({'id': idx, 'source': source_raw[idx], 'target': target_raw[idx],
+                                'edit_distance': 0, 'match_type': 'normalized'})
         if matches:
             return matches[:3]
 
-        # 3. Coincidencia con typos (solo si allow_typos)
         if allow_typos:
             for idx, norm in enumerate(source_norm):
                 len_diff = abs(len(norm) - len(query_norm))
                 if len_diff <= max_edits:
                     dist = self.levenshtein_distance(norm, query_norm)
                     if dist <= max_edits:
-                        matches.append({
-                            'id': idx,
-                            'source': source_raw[idx],
-                            'target': target_raw[idx],
-                            'edit_distance': dist,
-                            'match_type': 'typo'
-                        })
+                        matches.append({'id': idx, 'source': source_raw[idx], 'target': target_raw[idx],
+                                        'edit_distance': dist, 'match_type': 'typo'})
             matches.sort(key=lambda x: x['edit_distance'])
             return matches[:3]
         return []
 
     # --------------------------------------------------------
-    # División morfológica (solo para yor2es)
+    # División morfológica
     # --------------------------------------------------------
     def morphological_split_search(self, word, direction='yor2es', min_ratio=0.45, fuzzy_threshold=0.90):
         if direction != 'yor2es':
@@ -274,13 +301,13 @@ class YoremnokkilTranslator:
         self._lazy_init()
 
         word_norm = self.normalize_text(word)
-        word_len = len(word_norm)
+        word_len  = len(word_norm)
         if word_len < 4:
             return {'found': False, 'splits': []}
 
         valid_splits = []
         source_norm = self.yoremnokki_norm
-        target_raw = self.espanol_raw
+        target_raw  = self.espanol_raw
 
         for split_pos in range(int(word_len * min_ratio), int(word_len * 0.95) + 1):
             part1_norm = word_norm[:split_pos]
@@ -288,12 +315,10 @@ class YoremnokkilTranslator:
             if len(part1_norm) < 1 or len(part2_norm) < 1:
                 continue
 
-            # Buscar part2 exacto
             part2_indices = [i for i, n in enumerate(source_norm) if n == part2_norm]
             if not part2_indices:
                 continue
 
-            # Buscar part1 exacto o fuzzy
             part1_candidates = []
             for idx, norm in enumerate(source_norm):
                 if norm == part1_norm:
@@ -331,25 +356,21 @@ class YoremnokkilTranslator:
     # --------------------------------------------------------
     def fuzzy_token_match(self, query, direction='es2yor', threshold=0.3):
         self._lazy_init()
-        query_norm = self.normalize_text(query)
+        query_norm   = self.normalize_text(query)
         query_tokens = set(query_norm.split())
-        source_norm = self.espanol_norm if direction == 'es2yor' else self.yoremnokki_norm
-        target_raw = self.yoremnokki_raw if direction == 'es2yor' else self.espanol_raw
-        source_raw = self.espanol_raw if direction == 'es2yor' else self.yoremnokki_raw
+        source_norm  = self.espanol_norm   if direction == 'es2yor' else self.yoremnokki_norm
+        target_raw   = self.yoremnokki_raw if direction == 'es2yor' else self.espanol_raw
+        source_raw   = self.espanol_raw    if direction == 'es2yor' else self.yoremnokki_raw
 
         results = []
         for idx, item_norm in enumerate(source_norm):
             item_tokens = set(item_norm.split())
-            inter = query_tokens & item_tokens
-            union = query_tokens | item_tokens
+            inter   = query_tokens & item_tokens
+            union   = query_tokens | item_tokens
             jaccard = len(inter) / len(union) if union else 0
             if jaccard >= threshold:
-                results.append({
-                    'id': idx,
-                    'source': source_raw[idx],
-                    'target': target_raw[idx],
-                    'jaccard_score': jaccard
-                })
+                results.append({'id': idx, 'source': source_raw[idx],
+                                'target': target_raw[idx], 'jaccard_score': jaccard})
         results.sort(key=lambda x: x['jaccard_score'], reverse=True)
         return results
 
@@ -365,14 +386,14 @@ class YoremnokkilTranslator:
 
         results = []
         for i in range(len(lims) - 1):
-            start, end = lims[i], lims[i+1]
+            start, end = lims[i], lims[i + 1]
             for j in range(start, end):
-                idx = I[j]
+                idx   = I[j]
                 score = float(D[j])
                 results.append({
                     'id': idx,
-                    'espanol': self.espanol_raw[idx],
-                    'yoremnokki': self.yoremnokki_raw[idx],
+                    'espanol':     self.espanol_raw[idx],
+                    'yoremnokki':  self.yoremnokki_raw[idx],
                     'embedding_score': score
                 })
         results.sort(key=lambda x: x['embedding_score'], reverse=True)
@@ -386,7 +407,7 @@ class YoremnokkilTranslator:
         n = len(tokens)
         for m in range(min(max_n, n), 0, -1):
             for i in range(n - m + 1):
-                windows.append((i, i+m, ' '.join(tokens[i:i+m])))
+                windows.append((i, i + m, ' '.join(tokens[i:i + m])))
         return windows
 
     def compositional_translate(self, query, direction='es2yor', max_window=3):
@@ -398,16 +419,16 @@ class YoremnokkilTranslator:
             return {'success': False, 'chunks': []}
 
         covered = [False] * n
-        chunks = []
-        windows = self.ngram_windows(tokens_norm, max_window)
+        chunks   = []
+        windows  = self.ngram_windows(tokens_norm, max_window)
 
         for start, end, chunk_norm in windows:
             if any(covered[start:end]):
                 continue
             chunk_orig = ' '.join(tokens_orig[start:end])
-            matches = self.exact_match(chunk_orig, direction, allow_typos=True, max_edits=1)
+            matches    = self.exact_match(chunk_orig, direction, allow_typos=True, max_edits=1)
             if matches:
-                best = matches[0]
+                best   = matches[0]
                 target = best['target']
                 chunks.append({
                     'start': start, 'end': end,
@@ -419,7 +440,6 @@ class YoremnokkilTranslator:
                 for i in range(start, end):
                     covered[i] = True
 
-        # Tokens no cubiertos
         for i in range(n):
             if not covered[i]:
                 token_orig = tokens_orig[i]
@@ -428,7 +448,7 @@ class YoremnokkilTranslator:
                     if morph['found']:
                         best_split = morph['splits'][0]
                         chunks.append({
-                            'start': i, 'end': i+1,
+                            'start': i, 'end': i + 1,
                             'source': token_orig,
                             'translation': best_split['combined_translation'],
                             'match_type': 'morphological',
@@ -443,7 +463,7 @@ class YoremnokkilTranslator:
                         covered[i] = True
                         continue
                 chunks.append({
-                    'start': i, 'end': i+1,
+                    'start': i, 'end': i + 1,
                     'source': token_orig,
                     'translation': f"[{token_orig}]",
                     'match_type': 'unknown',
@@ -455,7 +475,7 @@ class YoremnokkilTranslator:
         return {'success': success, 'chunks': chunks}
 
     # --------------------------------------------------------
-    # Corrección gramatical con Azure (con caché y rate limit)
+    # Corrección gramatical con Azure
     # --------------------------------------------------------
     @lru_cache(maxsize=200)
     def corregir_gramatica_azure(self, texto_desordenado, client_id='default'):
@@ -516,7 +536,7 @@ Corrige esta frase: {texto_clean}"""
         if len(query.split()) > 1:
             comp = self.compositional_translate(query, direction, max_window=3)
             if comp['success']:
-                assembled = ' '.join(c['translation'] for c in comp['chunks'])
+                assembled  = ' '.join(c['translation'] for c in comp['chunks'])
                 correccion = None
                 if direction == 'yor2es' and self.azure_client:
                     correccion = self.corregir_gramatica_azure(assembled, client_id)
@@ -546,7 +566,7 @@ Corrige esta frase: {texto_clean}"""
                 return results
 
         fuzzy = self.fuzzy_token_match(query, direction, threshold=0.4)
-        emb = self.embedding_search(query, direction, top_k=top_k*2, min_similarity=0.5)
+        emb   = self.embedding_search(query, direction, top_k=top_k * 2, min_similarity=0.5)
 
         combined = {}
         for item in fuzzy[:10]:
@@ -570,11 +590,12 @@ Corrige esta frase: {texto_clean}"""
         results['alternatives'] = alts
         return results
 
+
 # ------------------------------------------------------------
 # Aplicación Flask
 # ------------------------------------------------------------
 app = Flask(__name__)
-translator = None          # se inicializa después de encontrar la DB
+translator      = None
 request_limiter = RateLimiter(max_calls=100, period=60)
 
 def get_client_ip():
@@ -590,37 +611,37 @@ def rate_limit_check():
 
 @app.route('/')
 def index():
-    # translator ya está inicializado (solo metadatos), pero _lazy_init() aún no se ha llamado.
-    # Esto es seguro porque total_pairs y embedding_dim ya existen.
-    return render_template('index.html', total_pairs=translator.total_pairs, embedding_dim=translator.embedding_dim)
+    return render_template('index.html',
+                           total_pairs=translator.total_pairs,
+                           embedding_dim=translator.embedding_dim)
 
 @app.route('/translate', methods=['POST'])
 def translate():
-    data = request.get_json()
-    query = data.get('query', '').strip()
+    data      = request.get_json()
+    query     = data.get('query', '').strip()
     direction = data.get('direction', 'es2yor')
     if not query:
         return jsonify({'error': 'Query vacío'}), 400
     if len(query) > 500:
         return jsonify({'error': 'Query demasiado largo'}), 400
     client_ip = get_client_ip()
-    results = translator.hybrid_search(query, direction=direction, top_k=5, client_id=client_ip)
+    results   = translator.hybrid_search(query, direction=direction, top_k=5, client_id=client_ip)
     return jsonify(results)
 
 @app.route('/stats', methods=['GET'])
 def stats():
     return jsonify({
-        'total_pairs': translator.total_pairs,
-        'embedding_dim': translator.embedding_dim
+        'total_pairs':   translator.total_pairs,
+        'embedding_dim': translator.embedding_dim,
+        'model_loaded':  translator._initialized
     })
 
 @app.route('/health', methods=['GET'])
 def health():
-    # No forzamos lazy_init para que sea ultrarrápido
     return jsonify({'status': 'ok', 'service': 'yoremnokki-translator'}), 200
 
 # ------------------------------------------------------------
-# Inicialización del traductor (solo metadatos, sin modelo ni índices)
+# Inicialización
 # ------------------------------------------------------------
 possible_paths = [
     'traductor_assets/traductor_yoremnokki.db',
