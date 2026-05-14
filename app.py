@@ -12,8 +12,6 @@ import time
 from threading import Lock
 import sys
 import faiss
-import gc
-from threading import Timer
 
 # ------------------------------------------------------------
 # Rate limiter con limpieza automática de entradas antiguas
@@ -60,9 +58,6 @@ class YoremnokkilTranslator:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._init_lock = Lock()
         self._initialized = False
-        self.request_count = 0
-        self.cache_cleanup_timer = None
-        self.schedule_cache_cleanup()
 
         # Metadatos ligeros (no cargan embeddings ni modelo)
         cursor = self.conn.cursor()
@@ -574,24 +569,6 @@ Corrige esta frase: {texto_clean}"""
         alts = [a for a in alts if a['score'] >= 0.5][:top_k]
         results['alternatives'] = alts
         return results
-    
-    def schedule_cache_cleanup(self):
-        """Programa limpieza de caché cada 3 minutos"""
-        if hasattr(self, 'cache_cleanup_timer') and self.cache_cleanup_timer:
-            self.cache_cleanup_timer.cancel()
-        # 180 segundos = 3 minutos
-        self.cache_cleanup_timer = Timer(180, self.cleanup_caches)
-        self.cache_cleanup_timer.daemon = True
-        self.cache_cleanup_timer.start()
-
-    def cleanup_caches(self):
-        """Limpia el caché LRU de Azure (si existe) y fuerza recolección de basura"""
-        # Si usas @lru_cache en corregir_gramatica_azure, límpialo
-        if hasattr(self, 'corregir_gramatica_azure'):
-            self.corregir_gramatica_azure.cache_clear()
-        gc.collect()
-        print(f"🧹 Memoria liberada a las {time.strftime('%H:%M:%S')}")
-        self.schedule_cache_cleanup()  # Reprogramar
 
 # ------------------------------------------------------------
 # Aplicación Flask
