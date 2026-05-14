@@ -6,9 +6,9 @@ import unicodedata
 import re
 import os
 from openai import AzureOpenAI
-from functools import lru_cache
+import httpx
 import time
-from threading import Lock
+from threading import Lock, Timer
 import sys
 import gc
 import faiss
@@ -46,6 +46,42 @@ class RateLimiter:
             return True
 
 # ------------------------------------------------------------
+# Cache con TTL (reemplaza lru_cache estático que retiene self)
+# ------------------------------------------------------------
+class TTLCache:
+    """Cache clave→valor con expiración por tiempo de vida."""
+    def __init__(self, maxsize=200, ttl=3600):
+        self.maxsize = maxsize
+        self.ttl     = ttl
+        self._cache  = {}       # key → (value, timestamp)
+        self._lock   = Lock()
+
+    def get(self, key):
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            value, ts = entry
+            if time.time() - ts > self.ttl:
+                del self._cache[key]
+                return None
+            return value
+
+    def set(self, key, value):
+        with self._lock:
+            if len(self._cache) >= self.maxsize:
+                oldest = min(self._cache, key=lambda k: self._cache[k][1])
+                del self._cache[oldest]
+            self._cache[key] = (value, time.time())
+
+    def clear(self):
+        with self._lock:
+            self._cache.clear()
+
+    def __len__(self):
+        return len(self._cache)
+
+# ------------------------------------------------------------
 # Traductor principal
 # ------------------------------------------------------------
 class YoremnokkilTranslator:
@@ -67,9 +103,16 @@ class YoremnokkilTranslator:
         azure_model = os.getenv("AZURE_MODEL", "gpt-4.1-mini")
 
         self.azure_rate_limiter = RateLimiter(max_calls=30, period=60)
-        self.azure_client = None
+        self.azure_client    = None
+        self._azure_http     = None   # httpx.Client propio — se cierra en _azure_close()
         self.azure_deployment = str(azure_deployment)
-        self.azure_model = str(azure_model)
+        self.azure_model      = str(azure_model)
+        self._azure_cache     = TTLCache(maxsize=200, ttl=3600)
+        self._last_request_ts = 0.0
+        self._idle_timer      = None
+        self._idle_lock       = Lock()
+        # Tiempo de inactividad (segundos) tras el cual se cierra el cliente Azure
+        self._idle_timeout    = int(os.getenv("AZURE_IDLE_TIMEOUT", 180))
 
         if azure_endpoint and azure_key:
             try:
@@ -79,11 +122,9 @@ class YoremnokkilTranslator:
                 if not endpoint_clean.endswith('/'):
                     endpoint_clean += '/'
                 if endpoint_clean and azure_key:
-                    self.azure_client = AzureOpenAI(
-                        api_key=azure_key,
-                        api_version="2024-12-01-preview",
-                        azure_endpoint=endpoint_clean
-                    )
+                    self._azure_endpoint = endpoint_clean
+                    self._azure_key      = azure_key
+                    self._init_azure_client()
                     print(f"✓ Azure OpenAI configurado (deployment: {self.azure_deployment})")
             except Exception as e:
                 print(f"⚠ Error configurando Azure OpenAI: {e}")
@@ -97,6 +138,51 @@ class YoremnokkilTranslator:
         self.esp_index = None
         self.yor_index = None
         self.model = None
+
+    # --------------------------------------------------------
+    # Gestión del cliente Azure (init, idle timeout, close)
+    # --------------------------------------------------------
+    def _init_azure_client(self):
+        """Instancia httpx.Client y AzureOpenAI con connection pool controlado."""
+        self._azure_http = httpx.Client(
+            timeout=httpx.Timeout(10.0),
+            limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
+        )
+        self.azure_client = AzureOpenAI(
+            api_key=self._azure_key,
+            api_version="2024-12-01-preview",
+            azure_endpoint=self._azure_endpoint,
+            http_client=self._azure_http,
+        )
+
+    def _azure_close(self):
+        """Cierra el connection pool de httpx y libera el cliente Azure."""
+        with self._idle_lock:
+            if self.azure_client is not None:
+                try:
+                    self._azure_http.close()
+                except Exception:
+                    pass
+                self.azure_client  = None
+                self._azure_http   = None
+                gc.collect()
+                print("♻ Cliente Azure cerrado por inactividad (RAM liberada)")
+
+    def _reset_idle_timer(self):
+        """Reinicia el temporizador de inactividad tras cada llamada a Azure."""
+        with self._idle_lock:
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+            self._idle_timer = Timer(self._idle_timeout, self._azure_close)
+            self._idle_timer.daemon = True
+            self._idle_timer.start()
+
+    def _ensure_azure_client(self):
+        """Re-crea el cliente si fue cerrado por idle y se necesita de nuevo."""
+        with self._idle_lock:
+            if self.azure_client is None and hasattr(self, '_azure_key'):
+                print("🔄 Reconectando cliente Azure...")
+                self._init_azure_client()
 
     # --------------------------------------------------------
     # Paths para índices FAISS serializados
@@ -477,8 +563,13 @@ class YoremnokkilTranslator:
     # --------------------------------------------------------
     # Corrección gramatical con Azure
     # --------------------------------------------------------
-    @lru_cache(maxsize=200)
     def corregir_gramatica_azure(self, texto_desordenado, client_id='default'):
+        # Consultar TTLCache antes de llamar a la API
+        cached = self._azure_cache.get(texto_desordenado)
+        if cached is not None:
+            return cached
+
+        self._ensure_azure_client()
         if not self.azure_client:
             return {'corregida': None, 'original': texto_desordenado, 'error': 'Azure no configurado'}
         if not self.azure_rate_limiter.is_allowed(client_id):
@@ -505,9 +596,14 @@ Corrige esta frase: {texto_clean}"""
                 timeout=10
             )
             corregida = response.choices[0].message.content.strip()
-            return {'corregida': corregida, 'original': texto_desordenado, 'error': None}
-        except Exception as e:
-            return {'corregida': None, 'original': texto_desordenado, 'error': 'Error en Azure OpenAI'}
+            result = {'corregida': corregida, 'original': texto_desordenado, 'error': None}
+        except Exception:
+            result = {'corregida': None, 'original': texto_desordenado, 'error': 'Error en Azure OpenAI'}
+
+        # Guardar en cache y reiniciar temporizador de inactividad
+        self._azure_cache.set(texto_desordenado, result)
+        self._reset_idle_timer()
+        return result
 
     # --------------------------------------------------------
     # Búsqueda híbrida (punto de entrada principal)
@@ -631,9 +727,11 @@ def translate():
 @app.route('/stats', methods=['GET'])
 def stats():
     return jsonify({
-        'total_pairs':   translator.total_pairs,
-        'embedding_dim': translator.embedding_dim,
-        'model_loaded':  translator._initialized
+        'total_pairs':    translator.total_pairs,
+        'embedding_dim':  translator.embedding_dim,
+        'model_loaded':   translator._initialized,
+        'azure_active':   translator.azure_client is not None,
+        'azure_cache_entries': len(translator._azure_cache),
     })
 
 @app.route('/health', methods=['GET'])
