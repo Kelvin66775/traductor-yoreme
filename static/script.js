@@ -127,7 +127,7 @@ function displayResults(data) {
         container.appendChild(exactSection);
     }
 
-    // Segmentación morfológica (simplificada, sin caja de análisis)
+    // Segmentación morfológica
     if (data.morphological) {
         const morphSection = document.createElement('div');
         morphSection.className = 'result-section';
@@ -151,41 +151,48 @@ function displayResults(data) {
         container.appendChild(morphSection);
     }
 
-    // Traducción composicional (con palabra por palabra y ocultando comillas)
+    // Traducción composicional con mejoras: palabra original y ocultar comillas
     if (data.compositional) {
         const compSection = document.createElement('div');
         compSection.className = 'result-section';
         compSection.innerHTML = `
-        <div class="section-title">
-            🔗 Traducción Composicional
-            <span class="badge badge-compositional">Ensamblada</span>
-        </div>
-    `;
+            <div class="section-title">
+                🔗 Traducción Composicional
+                <span class="badge badge-compositional">Ensamblada</span>
+            </div>
+        `;
 
         const card = document.createElement('div');
         card.className = 'translation-card';
 
-        // Función para saber si una traducción debe ocultarse (solo comilla simple)
-        const shouldHideTranslation = (translation) => translation === "'";
+        // Detecta traducciones que son solo comillas o vacías
+        const isBareQuote = (str) => {
+            if (!str) return true;
+            const trimmed = str.trim();
+            return trimmed === "'" || trimmed === "''" || trimmed === "´" || trimmed === "‘" || trimmed === "’" || trimmed === '"' || trimmed === "";
+        };
 
-        // Generar HTML para cada chunk, mostrando "palabra original → traducción"
         const chunksHtml = data.compositional.chunks.map(chunk => {
+            const userWord = chunk.source;
+            let translation = chunk.translation;
             let className = '';
             let tooltip = '';
             let displayText = '';
 
-            // Determinar clase y tooltip según el tipo de coincidencia
             if (chunk.match_type === 'unknown') {
                 className = 'chunk-unknown';
-                tooltip = 'Sin traducción';
-                displayText = chunk.source;  // solo la palabra original
+                tooltip = 'Sin traducción conocida';
+                displayText = userWord;
             } else {
                 if (chunk.match_type === 'morphological') {
                     className = 'chunk-known';
                     tooltip = `Segmentado: ${chunk.morphological_detail.part1} + ${chunk.morphological_detail.part2}`;
+                } else if (chunk.match_type === 'typo') {
+                    className = 'chunk-known';
+                    tooltip = 'Corrección tipográfica automática';
                 } else if (chunk.match_type === 'original_acento') {
                     className = 'chunk-known';
-                    tooltip = 'Coincidencia con acentos';
+                    tooltip = 'Coincidencia exacta con acentos';
                 } else if (chunk.match_type === 'normalized') {
                     className = 'chunk-known';
                     tooltip = 'Coincidencia sin acentos';
@@ -194,37 +201,39 @@ function displayResults(data) {
                     tooltip = 'Coincidencia exacta';
                 }
 
-                // Si la traducción es comilla, no la mostramos
-                if (shouldHideTranslation(chunk.translation)) {
-                    displayText = chunk.source;  // solo la palabra original
-                    tooltip += ' (traducción omitida)';
+                if (isBareQuote(translation)) {
+                    displayText = userWord;
+                    tooltip += ' (traducción omitida por ser vacía)';
                 } else {
-                    displayText = `${chunk.source} → ${chunk.translation}`;
+                    displayText = `${userWord} → ${translation}`;
+                    if (chunk.match_type === 'typo') {
+                        displayText += ' ✏️';
+                        tooltip += ' - Se interpretó la palabra más cercana';
+                    }
                 }
             }
-
             return `<span class="chunk ${className}" title="${tooltip}">${displayText}</span>`;
         }).join('');
 
         card.innerHTML = `
-        <div class="translation-main">${data.compositional.translation}</div>
-        ${data.compositional.translation_corrected ? `
-            <div class="ai-correction">
-                <div class="ai-header"><img src="/static/gpt.png" alt="IA" class="ai-icon-img"> Corrección con IA (Azure gpt-4.1-mini):</div>
-                <div class="ai-text">${data.compositional.translation_corrected}</div>
-            </div>
-        ` : ''}
-        ${data.compositional.azure_error ? `
-            <div class="ai-error">⚠ Error de IA: ${data.compositional.azure_error}</div>
-        ` : ''}
-        <div class="chunks-container">${chunksHtml}</div>
-        ${data.compositional.has_unknowns ? '<p class="unknown-warning">⚠ Contiene palabras sin traducción conocida</p>' : ''}
-    `;
+            <div class="translation-main">${data.compositional.translation}</div>
+            ${data.compositional.translation_corrected ? `
+                <div class="ai-correction">
+                    <div class="ai-header"><img src="/static/gpt.png" alt="IA" class="ai-icon-img"> Corrección con IA (Azure gpt-4.1-mini):</div>
+                    <div class="ai-text">${data.compositional.translation_corrected}</div>
+                </div>
+            ` : ''}
+            ${data.compositional.azure_error ? `
+                <div class="ai-error">⚠ Error de IA: ${data.compositional.azure_error}</div>
+            ` : ''}
+            <div class="chunks-container">${chunksHtml}</div>
+            ${data.compositional.has_unknowns ? '<p class="unknown-warning">⚠ Contiene palabras sin traducción conocida</p>' : ''}
+        `;
         compSection.appendChild(card);
         container.appendChild(compSection);
     }
 
-    // Alternativas (sin cambios)
+    // Alternativas
     if (data.alternatives.length > 0) {
         const altSection = document.createElement('div');
         altSection.className = 'result-section';
