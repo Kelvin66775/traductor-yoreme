@@ -14,10 +14,8 @@ from threading import Lock, Timer
 import sys
 import gc
 import faiss
+import signal
 
-# ------------------------------------------------------------
-# Rate limiter con limpieza automática de entradas antiguas
-# ------------------------------------------------------------
 class RateLimiter:
     def __init__(self, max_calls=30, period=60):
         self.max_calls = max_calls
@@ -47,9 +45,6 @@ class RateLimiter:
             self.calls[client_id].append(now)
             return True
 
-# ------------------------------------------------------------
-# Cache con TTL (reemplaza lru_cache estático que retiene self)
-# ------------------------------------------------------------
 class TTLCache:
     """Cache clave→valor con expiración por tiempo de vida."""
     def __init__(self, maxsize=200, ttl=3600):
@@ -83,9 +78,6 @@ class TTLCache:
     def __len__(self):
         return len(self._cache)
 
-# ------------------------------------------------------------
-# Traductor principal
-# ------------------------------------------------------------
 class YoremnokkilTranslator:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -141,9 +133,6 @@ class YoremnokkilTranslator:
         self.yor_index = None
         self.model = None
 
-    # --------------------------------------------------------
-    # Gestión del cliente Azure (init, idle timeout, close)
-    # --------------------------------------------------------
     def _init_azure_client(self):
         """Instancia httpx.Client y AzureOpenAI con connection pool controlado."""
         self._azure_http = httpx.Client(
@@ -186,9 +175,6 @@ class YoremnokkilTranslator:
                 print("🔄 Reconectando cliente Azure...")
                 self._init_azure_client()
 
-    # --------------------------------------------------------
-    # Paths para índices FAISS serializados
-    # --------------------------------------------------------
     def _index_paths(self):
         base = Path(self.db_path).parent
         return (
@@ -197,10 +183,6 @@ class YoremnokkilTranslator:
             base / "faiss_texts.npz"
         )
 
-    # --------------------------------------------------------
-    # Carga lazy: intenta leer índices desde disco, si no los
-    # construye UNA sola vez y los persiste para arranques futuros
-    # --------------------------------------------------------
     def _lazy_init(self):
         if self._initialized:
             return
@@ -312,9 +294,6 @@ class YoremnokkilTranslator:
         self._initialized = True
         print(f"✓ Índices FAISS construidos ({self.total_pairs} pares)")
 
-    # --------------------------------------------------------
-    # Métodos auxiliares
-    # --------------------------------------------------------
     def normalize_text(self, text):
         text = text.lower()
         text = unicodedata.normalize('NFD', text)
@@ -338,10 +317,7 @@ class YoremnokkilTranslator:
                 current_row.append(min(insertions, deletions, substitutions))
             previous_row = current_row
         return previous_row[-1]
-
-    # --------------------------------------------------------
-    # Búsqueda exacta
-    # --------------------------------------------------------
+    
     def exact_match(self, query, direction='es2yor', allow_typos=False, max_edits=1):
         self._lazy_init()
         query_norm = self.normalize_text(query)
@@ -376,9 +352,6 @@ class YoremnokkilTranslator:
             return matches[:3]
         return []
 
-    # --------------------------------------------------------
-    # División morfológica
-    # --------------------------------------------------------
     def morphological_split_search(self, word, direction='yor2es', min_ratio=0.45, fuzzy_threshold=0.90):
         if direction != 'yor2es':
             return {'found': False, 'splits': []}
@@ -435,9 +408,6 @@ class YoremnokkilTranslator:
         valid_splits.sort(key=lambda x: x['score'], reverse=True)
         return {'found': len(valid_splits) > 0, 'splits': valid_splits[:3]}
 
-    # --------------------------------------------------------
-    # Fuzzy token match (Jaccard)
-    # --------------------------------------------------------
     def fuzzy_token_match(self, query, direction='es2yor', threshold=0.3):
         self._lazy_init()
         query_norm   = self.normalize_text(query)
@@ -458,11 +428,6 @@ class YoremnokkilTranslator:
         results.sort(key=lambda x: x['jaccard_score'], reverse=True)
         return results
 
-    # --------------------------------------------------------
-    # Búsqueda por embeddings (FAISS) — via proceso hijo efímero
-    # PyTorch corre en ml_worker.py y muere al terminar;
-    # el SO recupera su RAM inmediatamente.
-    # --------------------------------------------------------
     def _get_embedding_via_worker(self, query: str):
         """
         Lanza ml_worker.py como subproceso, obtiene el embedding como JSON
@@ -535,9 +500,6 @@ class YoremnokkilTranslator:
         results.sort(key=lambda x: x['embedding_score'], reverse=True)
         return results[:top_k]
 
-    # --------------------------------------------------------
-    # Traducción composicional (ngrams)
-    # --------------------------------------------------------
     def ngram_windows(self, tokens, max_n=3):
         windows = []
         n = len(tokens)
@@ -610,9 +572,6 @@ class YoremnokkilTranslator:
         success = any(c['match_type'] != 'unknown' for c in chunks)
         return {'success': success, 'chunks': chunks}
 
-    # --------------------------------------------------------
-    # Corrección gramatical con Azure
-    # --------------------------------------------------------
     def corregir_gramatica_azure(self, texto_desordenado, client_id='default'):
         # Consultar TTLCache antes de llamar a la API
         cached = self._azure_cache.get(texto_desordenado)
@@ -655,9 +614,6 @@ Corrige esta frase: {texto_clean}"""
         self._reset_idle_timer()
         return result
 
-    # --------------------------------------------------------
-    # Búsqueda híbrida (punto de entrada principal)
-    # --------------------------------------------------------
     def hybrid_search(self, query, direction='es2yor', top_k=5, client_id='default'):
         results = {
             'query': query,
@@ -736,10 +692,6 @@ Corrige esta frase: {texto_clean}"""
         results['alternatives'] = alts
         return results
 
-
-# ------------------------------------------------------------
-# Aplicación Flask
-# ------------------------------------------------------------
 app = Flask(__name__)
 translator      = None
 request_limiter = RateLimiter(max_calls=100, period=60)
@@ -788,9 +740,6 @@ def stats():
 def health():
     return jsonify({'status': 'ok', 'service': 'yoremnokki-translator'}), 200
 
-# ------------------------------------------------------------
-# Inicialización
-# ------------------------------------------------------------
 possible_paths = [
     'traductor_assets/traductor_yoremnokki.db',
     'traductor_yoremnokki.db',
@@ -811,13 +760,6 @@ print("Inicializando traductor (modo lazy, solo metadatos)...")
 translator = YoremnokkilTranslator(db_path)
 print(f"✓ Base de datos conectada. {translator.total_pairs} pares, dimensión {translator.embedding_dim}")
 print("⏳ El modelo y los índices se cargarán en la primera petición real.")
-
-# ------------------------------------------------------------
-# Shutdown limpio — crítico para que Railway termine el
-# contenedor correctamente en pause/redeploy y no deje
-# instancias zombie consumiendo RAM y billing
-# ------------------------------------------------------------
-import signal
 
 def _graceful_shutdown(signum, frame):
     print(f"🛑 Señal {signum} recibida — cerrando proceso limpiamente...")
