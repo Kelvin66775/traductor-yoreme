@@ -787,6 +787,65 @@ translator = YoremnokkilTranslator(db_path)
 print(f"✓ Base de datos conectada. {translator.total_pairs} pares, dimensión {translator.embedding_dim}")
 print("⏳ El modelo y los índices se cargarán en la primera petición real.")
 
+# ------------------------------------------------------------
+# Shutdown limpio — crítico para que Railway termine el
+# contenedor correctamente en pause/redeploy y no deje
+# instancias zombie consumiendo RAM y billing
+# ------------------------------------------------------------
+import signal
+
+def _graceful_shutdown(signum, frame):
+    print(f"🛑 Señal {signum} recibida — cerrando proceso limpiamente...")
+
+    # 1. Cancelar timer de idle de Azure si está activo
+    try:
+        if translator._idle_timer is not None:
+            translator._idle_timer.cancel()
+    except Exception:
+        pass
+
+    # 2. Cerrar cliente Azure y su connection pool httpx
+    try:
+        translator._azure_close()
+    except Exception:
+        pass
+
+    # 3. Cerrar conexión SQLite
+    try:
+        translator.conn.close()
+    except Exception:
+        pass
+
+    # 4. Liberar modelo de PyTorch de memoria
+    try:
+        if translator.model is not None:
+            del translator.model
+            translator.model = None
+    except Exception:
+        pass
+
+    # 5. Liberar índices FAISS
+    try:
+        translator.esp_index = None
+        translator.yor_index = None
+    except Exception:
+        pass
+
+    # 6. Forzar GC y devolver heap al SO
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+    print("✓ Shutdown completo — proceso terminado")
+    sys.exit(0)
+
+# Registrar handler para SIGTERM (Railway pause/stop) y SIGINT (Ctrl+C local)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+signal.signal(signal.SIGINT,  _graceful_shutdown)
+
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
