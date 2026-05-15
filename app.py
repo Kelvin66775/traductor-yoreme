@@ -5,6 +5,7 @@ from pathlib import Path
 import unicodedata
 import re
 import os
+import ctypes
 from openai import AzureOpenAI
 import httpx
 import time
@@ -112,7 +113,7 @@ class YoremnokkilTranslator:
         self._idle_timer      = None
         self._idle_lock       = Lock()
         # Tiempo de inactividad (segundos) tras el cual se cierra el cliente Azure
-        self._idle_timeout    = int(os.getenv("AZURE_IDLE_TIMEOUT", 180))
+        self._idle_timeout    = int(os.getenv("AZURE_IDLE_TIMEOUT", 300))
 
         if azure_endpoint and azure_key:
             try:
@@ -231,12 +232,34 @@ class YoremnokkilTranslator:
             # Primera vez: construir y persistir
             self._build_and_persist_indexes(esp_path, yor_path, txt_path)
 
+    @staticmethod
+    def _malloc_trim():
+        """
+        Devuelve al SO la RAM que glibc/PyTorch tienen en su heap pero marcada
+        como libre. Sin esta llamada el SO (y Railway) la sigue contando como
+        consumo aunque Python ya no la use.
+        """
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass  # no-op en macOS / Windows
+
     def _load_sentence_transformer(self):
         """Importa y carga SentenceTransformer de forma diferida."""
         if self.model is not None:
             return
         # Importación diferida: PyTorch no se carga hasta este momento
         from sentence_transformers import SentenceTransformer as ST
+        import torch
+
+        # Desactivar el cache interno de memoria de PyTorch en CPU.
+        # Por defecto PyTorch retiene bloques libres en su propio allocator
+        # y nunca los devuelve al SO; esto lo deshabilita.
+        try:
+            torch.set_num_threads(1)              # limitar threads innecesarios
+        except Exception:
+            pass
+
         model_cache_dir = os.getenv("SENTENCE_TRANSFORMERS_HOME", "./model_cache")
         os.makedirs(model_cache_dir, exist_ok=True)
         print("🔧 Cargando modelo SentenceTransformer (all-MiniLM-L6-v2)...")
@@ -466,6 +489,8 @@ class YoremnokkilTranslator:
     def embedding_search(self, query, direction='es2yor', top_k=10, min_similarity=0.5):
         self._lazy_init()
         query_emb = self.model.encode(query, convert_to_numpy=True).reshape(1, -1).astype(np.float32)
+        gc.collect()
+        self._malloc_trim()   # devolver al SO la RAM libre del heap de PyTorch/glibc
         faiss.normalize_L2(query_emb)
         index = self.esp_index if direction == 'es2yor' else self.yor_index
         lims, D, I = index.range_search(query_emb, min_similarity)
