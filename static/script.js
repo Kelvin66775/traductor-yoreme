@@ -39,7 +39,7 @@ async function performSearch() {
             body: JSON.stringify({ query: query, direction: currentDirection })
         });
         const data = await response.json();
-        displayResults(data);
+        displayResults(data, query);
 
         // Solo agregar al historial si hay algún resultado
         const hasResults = data.exact_matches.length > 0 ||
@@ -64,7 +64,7 @@ document.getElementById('searchInput').addEventListener('keypress', (e) => {
 });
 
 // --- Mostrar resultados ---
-function displayResults(data) {
+function displayResults(data, query = '') {
     const container = document.getElementById('resultsContainer');
     container.innerHTML = '';
 
@@ -114,14 +114,25 @@ function displayResults(data) {
                 matchTypeLabel = '<span class="match-type indigo">✓ Corrección ortográfica</span>';
             }
 
+            // ─── CAMBIO: distinguir si hubo corrección tipográfica ───
+            const sourceLabel = match.match_type === 'typo'
+                ? `<div class="translation-source">
+               Interpretado como: <strong>${match.source}</strong>
+               <span style="color: var(--color-warning); font-size: 0.8em;">
+                   (escribiste: "${query}")
+               </span>
+           </div>`
+                : `<div class="translation-source">Fuente: ${match.source}</div>`;
+            // ─────────────────────────────────────────────────────────
+
             card.innerHTML = `
-                <div class="translation-main">${match.target}</div>
-                <div class="translation-source">Fuente: ${match.source}</div>
-                ${matchTypeLabel}
-                <div class="confidence-bar">
-                    <div class="confidence-fill" style="width: 100%"></div>
-                </div>
-            `;
+        <div class="translation-main">${match.target}</div>
+        ${sourceLabel}
+        ${matchTypeLabel}
+        <div class="confidence-bar">
+            <div class="confidence-fill" style="width: 100%"></div>
+        </div>
+    `;
             exactSection.appendChild(card);
         });
         container.appendChild(exactSection);
