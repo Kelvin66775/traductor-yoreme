@@ -39,7 +39,7 @@ async function performSearch() {
             body: JSON.stringify({ query: query, direction: currentDirection })
         });
         const data = await response.json();
-        displayResults(data, query);
+        displayResults(data);
 
         // Solo agregar al historial si hay algún resultado
         const hasResults = data.exact_matches.length > 0 ||
@@ -64,7 +64,7 @@ document.getElementById('searchInput').addEventListener('keypress', (e) => {
 });
 
 // --- Mostrar resultados ---
-function displayResults(data, query = '') {
+function displayResults(data) {
     const container = document.getElementById('resultsContainer');
     container.innerHTML = '';
 
@@ -114,31 +114,20 @@ function displayResults(data, query = '') {
                 matchTypeLabel = '<span class="match-type indigo">✓ Corrección ortográfica</span>';
             }
 
-            // ─── CAMBIO: distinguir si hubo corrección tipográfica ───
-            const sourceLabel = match.match_type === 'typo'
-                ? `<div class="translation-source">
-               Interpretado como: <strong>${match.source}</strong>
-               <span style="color: var(--color-warning); font-size: 0.8em;">
-                   (escribiste: "${query}")
-               </span>
-           </div>`
-                : `<div class="translation-source">Fuente: ${match.source}</div>`;
-            // ─────────────────────────────────────────────────────────
-
             card.innerHTML = `
-        <div class="translation-main">${match.target}</div>
-        ${sourceLabel}
-        ${matchTypeLabel}
-        <div class="confidence-bar">
-            <div class="confidence-fill" style="width: 100%"></div>
-        </div>
-    `;
+                <div class="translation-main">${match.target}</div>
+                <div class="translation-source">Fuente: ${match.source}</div>
+                ${matchTypeLabel}
+                <div class="confidence-bar">
+                    <div class="confidence-fill" style="width: 100%"></div>
+                </div>
+            `;
             exactSection.appendChild(card);
         });
         container.appendChild(exactSection);
     }
 
-    // Segmentación morfológica
+    // Segmentación morfológica (simplificada, sin caja de análisis)
     if (data.morphological) {
         const morphSection = document.createElement('div');
         morphSection.className = 'result-section';
@@ -162,7 +151,7 @@ function displayResults(data, query = '') {
         container.appendChild(morphSection);
     }
 
-    // Traducción composicional con mejoras: palabra original y ocultar comillas
+    // Traducción composicional (sin cambios)
     if (data.compositional) {
         const compSection = document.createElement('div');
         compSection.className = 'result-section';
@@ -176,54 +165,26 @@ function displayResults(data, query = '') {
         const card = document.createElement('div');
         card.className = 'translation-card';
 
-        // Detecta traducciones que son solo comillas o vacías
-        const isBareQuote = (str) => {
-            if (!str) return true;
-            const trimmed = str.trim();
-            return trimmed === "'" || trimmed === "''" || trimmed === "´" || trimmed === "‘" || trimmed === "’" || trimmed === '"' || trimmed === "";
-        };
-
         const chunksHtml = data.compositional.chunks.map(chunk => {
-            const userWord = chunk.source;
-            let translation = chunk.translation;
             let className = '';
             let tooltip = '';
-            let displayText = '';
-
             if (chunk.match_type === 'unknown') {
                 className = 'chunk-unknown';
-                tooltip = 'Sin traducción conocida';
-                displayText = userWord;
+                tooltip = 'Sin traducción';
+            } else if (chunk.match_type === 'morphological') {
+                className = 'chunk-known';
+                tooltip = `Segmentado: ${chunk.morphological_detail.part1} + ${chunk.morphological_detail.part2}`;
+            } else if (chunk.match_type === 'original_acento') {
+                className = 'chunk-known';
+                tooltip = 'Coincidencia con acentos';
+            } else if (chunk.match_type === 'normalized') {
+                className = 'chunk-known';
+                tooltip = 'Coincidencia sin acentos';
             } else {
-                if (chunk.match_type === 'morphological') {
-                    className = 'chunk-known';
-                    tooltip = `Segmentado: ${chunk.morphological_detail.part1} + ${chunk.morphological_detail.part2}`;
-                } else if (chunk.match_type === 'typo') {
-                    className = 'chunk-known';
-                    tooltip = 'Corrección tipográfica automática';
-                } else if (chunk.match_type === 'original_acento') {
-                    className = 'chunk-known';
-                    tooltip = 'Coincidencia exacta con acentos';
-                } else if (chunk.match_type === 'normalized') {
-                    className = 'chunk-known';
-                    tooltip = 'Coincidencia sin acentos';
-                } else {
-                    className = 'chunk-known';
-                    tooltip = 'Coincidencia exacta';
-                }
-
-                if (isBareQuote(translation)) {
-                    displayText = userWord;
-                    tooltip += ' (traducción omitida por ser vacía)';
-                } else {
-                    displayText = `${userWord} → ${translation}`;
-                    if (chunk.match_type === 'typo') {
-                        displayText += ' ✏️';
-                        tooltip += ' - Se interpretó la palabra más cercana';
-                    }
-                }
+                className = 'chunk-known';
+                tooltip = 'Coincidencia exacta';
             }
-            return `<span class="chunk ${className}" title="${tooltip}">${displayText}</span>`;
+            return `<span class="chunk ${className}" title="${tooltip}">${chunk.translation}</span>`;
         }).join('');
 
         card.innerHTML = `
@@ -244,7 +205,7 @@ function displayResults(data, query = '') {
         container.appendChild(compSection);
     }
 
-    // Alternativas
+    // Alternativas (sin cambios)
     if (data.alternatives.length > 0) {
         const altSection = document.createElement('div');
         altSection.className = 'result-section';
