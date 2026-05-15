@@ -5,6 +5,7 @@ from pathlib import Path
 import unicodedata
 import re
 import os
+import json
 import ctypes
 from openai import AzureOpenAI
 import httpx
@@ -234,41 +235,15 @@ class YoremnokkilTranslator:
 
     @staticmethod
     def _malloc_trim():
-        """
-        Devuelve al SO la RAM que glibc/PyTorch tienen en su heap pero marcada
-        como libre. Sin esta llamada el SO (y Railway) la sigue contando como
-        consumo aunque Python ya no la use.
-        """
         try:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except Exception:
-            pass  # no-op en macOS / Windows
-
-    def _load_sentence_transformer(self):
-        """Importa y carga SentenceTransformer de forma diferida."""
-        if self.model is not None:
-            return
-        # Importación diferida: PyTorch no se carga hasta este momento
-        from sentence_transformers import SentenceTransformer as ST
-        import torch
-
-        # Desactivar el cache interno de memoria de PyTorch en CPU.
-        # Por defecto PyTorch retiene bloques libres en su propio allocator
-        # y nunca los devuelve al SO; esto lo deshabilita.
-        try:
-            torch.set_num_threads(1)              # limitar threads innecesarios
-        except Exception:
             pass
 
-        model_cache_dir = os.getenv("SENTENCE_TRANSFORMERS_HOME", "./model_cache")
-        os.makedirs(model_cache_dir, exist_ok=True)
-        print("🔧 Cargando modelo SentenceTransformer (all-MiniLM-L6-v2)...")
-        try:
-            self.model = ST('all-MiniLM-L6-v2', cache_folder=model_cache_dir)
-        except Exception as e:
-            print(f"❌ Error cargando modelo: {e}")
-            raise RuntimeError("No se pudo cargar el modelo.") from e
-        print("✓ Modelo cargado")
+    def _load_sentence_transformer(self):
+        """Ya no carga PyTorch en el proceso principal — no-op."""
+        pass
+
 
     def _build_and_persist_indexes(self, esp_path, yor_path, txt_path):
         """Construye índices FAISS desde la DB y los guarda en disco."""
@@ -484,13 +459,63 @@ class YoremnokkilTranslator:
         return results
 
     # --------------------------------------------------------
-    # Búsqueda por embeddings (FAISS)
+    # Búsqueda por embeddings (FAISS) — via proceso hijo efímero
+    # PyTorch corre en ml_worker.py y muere al terminar;
+    # el SO recupera su RAM inmediatamente.
     # --------------------------------------------------------
+    def _get_embedding_via_worker(self, query: str):
+        """
+        Lanza ml_worker.py como subproceso, obtiene el embedding como JSON
+        y retorna un np.ndarray float32. El proceso hijo muere solo.
+        """
+        import subprocess
+        import base64
+
+        payload = base64.b64encode(
+            json.dumps({"query": query}).encode("utf-8")
+        ).decode("ascii")
+
+        worker_path = os.path.join(os.path.dirname(__file__) or ".", "ml_worker.py")
+
+        try:
+            result = subprocess.run(
+                [sys.executable, worker_path, payload],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            print("⚠ ml_worker timeout")
+            return None
+        except Exception as e:
+            print(f"⚠ ml_worker error al lanzar: {e}")
+            return None
+
+        stdout = result.stdout.strip()
+        if not stdout:
+            print(f"⚠ ml_worker sin salida. stderr: {result.stderr.strip()}")
+            return None
+
+        try:
+            data = json.loads(stdout)
+        except Exception:
+            print(f"⚠ ml_worker JSON inválido: {stdout[:200]}")
+            return None
+
+        if "error" in data:
+            print(f"⚠ ml_worker reportó error: {data['error']}")
+            return None
+
+        return np.array(data["embedding"], dtype=np.float32)
+
     def embedding_search(self, query, direction='es2yor', top_k=10, min_similarity=0.5):
         self._lazy_init()
-        query_emb = self.model.encode(query, convert_to_numpy=True).reshape(1, -1).astype(np.float32)
-        gc.collect()
-        self._malloc_trim()   # devolver al SO la RAM libre del heap de PyTorch/glibc
+
+        query_emb = self._get_embedding_via_worker(query)
+        if query_emb is None:
+            return []
+
+        query_emb = query_emb.reshape(1, -1)
         faiss.normalize_L2(query_emb)
         index = self.esp_index if direction == 'es2yor' else self.yor_index
         lims, D, I = index.range_search(query_emb, min_similarity)
@@ -816,13 +841,8 @@ def _graceful_shutdown(signum, frame):
     except Exception:
         pass
 
-    # 4. Liberar modelo de PyTorch de memoria
-    try:
-        if translator.model is not None:
-            del translator.model
-            translator.model = None
-    except Exception:
-        pass
+    # 4. PyTorch ya no vive en el proceso principal (corre en ml_worker.py)
+    #    — no hay modelo que liberar aquí
 
     # 5. Liberar índices FAISS
     try:
